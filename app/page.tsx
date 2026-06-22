@@ -648,65 +648,67 @@ export default function Home() {
           </div>
 
           <div className="rt-header-controls">
-          <div className="rt-key-bar">
-            <div className="rt-key-bar-head">
-              <span
-                className={`rt-key-dot${username.trim() ? " rt-key-dot--active" : ""}`}
-                aria-hidden
-              />
-              <label className="rt-key-label" htmlFor="username">
-                Username
-              </label>
-            </div>
-            <div className="rt-key-input-row">
-              <input
-                id="username"
-                type="text"
-                className="rt-key-input"
-                value={username}
-                onChange={(e) => handleUsernameChange(e.target.value)}
-                placeholder="Your name"
-                autoComplete="username"
-                spellCheck={false}
-              />
-            </div>
-          </div>
+            <div className="rt-key-bar rt-key-bar--inline">
+              <div className="rt-inline-field rt-inline-field--user">
+                <div className="rt-key-bar-head">
+                  <span
+                    className={`rt-key-dot${username.trim() ? " rt-key-dot--active" : ""}`}
+                    aria-hidden
+                  />
+                  <label className="rt-key-label" htmlFor="username">
+                    Username
+                  </label>
+                </div>
+                <div className="rt-key-input-row">
+                  <input
+                    id="username"
+                    type="text"
+                    className="rt-key-input"
+                    value={username}
+                    onChange={(e) => handleUsernameChange(e.target.value)}
+                    placeholder="Your name"
+                    autoComplete="username"
+                    spellCheck={false}
+                  />
+                </div>
+              </div>
 
-          <div className="rt-key-bar">
-            <div className="rt-key-bar-head">
-              <span
-                className={`rt-key-dot${apiKey.trim() ? " rt-key-dot--active" : ""}`}
-                aria-hidden
-              />
-              <label className="rt-key-label" htmlFor="openrouter-key">
-                OpenRouter key
-              </label>
-              <span className="rt-key-badge">
-                {apiKey.trim() ? "Your key" : "Server key"}
-              </span>
+              <div className="rt-inline-field rt-inline-field--key">
+                <div className="rt-key-bar-head">
+                  <span
+                    className={`rt-key-dot${apiKey.trim() ? " rt-key-dot--active" : ""}`}
+                    aria-hidden
+                  />
+                  <label className="rt-key-label" htmlFor="openrouter-key">
+                    OpenRouter key
+                  </label>
+                  <span className="rt-key-badge">
+                    {apiKey.trim() ? "Your key" : "Server key"}
+                  </span>
+                </div>
+                <div className="rt-key-input-row">
+                  <input
+                    id="openrouter-key"
+                    type={showApiKey ? "text" : "password"}
+                    className="rt-key-input"
+                    value={apiKey}
+                    onChange={(e) => handleApiKeyChange(e.target.value)}
+                    placeholder="sk-or-v1-…"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <button
+                    type="button"
+                    className="rt-key-toggle"
+                    onClick={() => setShowApiKey((v) => !v)}
+                    aria-label={showApiKey ? "Hide API key" : "Show API key"}
+                    title={showApiKey ? "Hide" : "Show"}
+                  >
+                    {showApiKey ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
             </div>
-            <div className="rt-key-input-row">
-              <input
-                id="openrouter-key"
-                type={showApiKey ? "text" : "password"}
-                className="rt-key-input"
-                value={apiKey}
-                onChange={(e) => handleApiKeyChange(e.target.value)}
-                placeholder="sk-or-v1-…"
-                autoComplete="off"
-                spellCheck={false}
-              />
-              <button
-                type="button"
-                className="rt-key-toggle"
-                onClick={() => setShowApiKey((v) => !v)}
-                aria-label={showApiKey ? "Hide API key" : "Show API key"}
-                title={showApiKey ? "Hide" : "Show"}
-              >
-                {showApiKey ? "Hide" : "Show"}
-              </button>
-            </div>
-          </div>
           </div>
         </div>
       </header>

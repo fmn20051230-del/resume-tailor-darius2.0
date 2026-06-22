@@ -127,8 +127,6 @@ textarea {
 
 .rt-header-controls {
   display: flex;
-  gap: 0.75rem;
-  flex-wrap: wrap;
   flex-shrink: 0;
   align-items: flex-start;
 }
@@ -142,6 +140,42 @@ textarea {
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.rt-key-bar--inline {
+  width: min(100%, 640px);
+  display: flex;
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 0.85rem;
+  flex-wrap: nowrap;
+}
+
+.rt-inline-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.rt-inline-field--user {
+  flex: 0 0 148px;
+}
+
+.rt-inline-field--key {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+@media (max-width: 560px) {
+  .rt-key-bar--inline {
+    flex-wrap: wrap;
+  }
+
+  .rt-inline-field--user,
+  .rt-inline-field--key {
+    flex: 1 1 100%;
+  }
 }
 
 .rt-key-bar:focus-within {
