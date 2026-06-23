@@ -208,6 +208,15 @@ function isSummarySection(section: string): boolean {
   return section.includes("summary") || section.includes("profile");
 }
 
+function isKnownSectionTitle(normalized: string): boolean {
+  if (isSummarySection(normalized)) return true;
+  if (normalized.includes("education")) return true;
+  if (normalized.includes("experience") || normalized.includes("employment")) return true;
+  if (normalized.includes("skill")) return true;
+  if (normalized.includes("certification") || normalized.includes("license")) return true;
+  return false;
+}
+
 type ParsedSectionHeader = {
   section: string;
   inlineContent?: string;
@@ -219,14 +228,18 @@ function detectSectionHeader(line: string): ParsedSectionHeader | null {
 
   const boldOnly = trimmed.match(/^\*\*([^*]+)\*\*\s*:?\s*$/);
   if (boldOnly) {
-    return { section: normalizeSection(boldOnly[1]) };
+    const section = normalizeSection(boldOnly[1]);
+    if (!isKnownSectionTitle(section)) return null;
+    return { section };
   }
 
   const boldInline = trimmed.match(/^\*\*([^*]+)\*\*\s*:+\s*(.+)$/);
   if (boldInline) {
+    const section = normalizeSection(boldInline[1]);
+    if (!isKnownSectionTitle(section)) return null;
     return {
-      section: normalizeSection(boldInline[1]),
-      inlineContent: boldInline[2],
+      section,
+      inlineContent: isSummarySection(section) ? boldInline[2] : undefined,
     };
   }
 
@@ -359,6 +372,62 @@ function parseSkillLine(line: string): ResumeSkillGroup | null {
   const idx = plain.indexOf(":");
   if (idx > 0) return { category: plain.slice(0, idx).trim(), items: plain.slice(idx + 1).trim() };
   return null;
+}
+
+function parseExperienceHeaderLine(
+  line: string
+): { company?: string; role?: string; period?: string } | null {
+  const boldPipe = line.match(/^\*\*([^*]+)\*\*\s*[|–—-]\s*(.+)$/);
+  if (boldPipe) {
+    const left = boldPipe[1].trim();
+    const right = stripInline(boldPipe[2]);
+    const periodMatch = right.match(DATE_RANGE_RE);
+    if (periodMatch) {
+      return { role: left, period: periodMatch[1] };
+    }
+    return { company: left };
+  }
+
+  const boldOnly = line.match(/^\*\*([^*]+)\*\*\s*$/);
+  if (boldOnly) {
+    return { company: boldOnly[1].trim() };
+  }
+
+  const dated = splitDateLine(line);
+  if (dated) {
+    return { role: dated.left, period: dated.right };
+  }
+
+  const plain = stripInline(line);
+  if (plain && !/^[-*•\d]/.test(line.trim()) && plain.length <= 120) {
+    return { company: plain };
+  }
+
+  return null;
+}
+
+function startJob(
+  partial: { company?: string; role?: string; period?: string },
+  currentJob: ResumeJob | null,
+  flushJob: () => void
+): { job: ResumeJob; expectRoleLine: boolean } {
+  if (currentJob) flushJob();
+  const job: ResumeJob = {
+    company: partial.company ?? "",
+    role: partial.role ?? "",
+    period: partial.period ?? "",
+    bullets: [],
+  };
+  return { job, expectRoleLine: !job.role && !!job.company };
+}
+
+function experienceNeedsFallback(jobs: ResumeJob[]): boolean {
+  if (!jobs.length) return true;
+  return jobs.every((job) => job.bullets.length === 0);
+}
+
+export function hasUsableExperience(jobs: ResumeJob[]): boolean {
+  return jobs.length > 0 && !experienceNeedsFallback(jobs);
 }
 
 function parseResumeMarkdownCore(md: string): ResumeData {
@@ -622,10 +691,39 @@ function parseResumeMarkdownCore(md: string): ResumeData {
     }
 
     if (section.includes("experience") || section.includes("employment")) {
-      const bullet = line.trim().match(/^[-*]\s+(.*)$/);
+      const bullet = line.trim().match(/^[-*•]\s+(.*)$/);
       if (bullet && currentJob) {
         currentJob.bullets.push(stripInline(bullet[1]));
         expectRoleLine = false;
+        continue;
+      }
+
+      const numbered = line.trim().match(/^\d+\.\s+(.*)$/);
+      if (numbered && currentJob) {
+        currentJob.bullets.push(stripInline(numbered[1]));
+        expectRoleLine = false;
+        continue;
+      }
+
+      const expHeader = parseExperienceHeaderLine(line);
+      if (expHeader) {
+        if (!currentJob) {
+          const started = startJob(expHeader, currentJob, flushJob);
+          currentJob = started.job;
+          expectRoleLine = started.expectRoleLine;
+        } else if (expectRoleLine || (!currentJob.role && expHeader.role)) {
+          if (expHeader.role) {
+            currentJob.role = expHeader.role;
+            if (expHeader.period) currentJob.period = expHeader.period;
+          } else if (expHeader.company) {
+            currentJob.company = expHeader.company;
+          }
+          expectRoleLine = false;
+        } else {
+          const started = startJob(expHeader, currentJob, flushJob);
+          currentJob = started.job;
+          expectRoleLine = started.expectRoleLine;
+        }
         continue;
       }
 
@@ -685,6 +783,12 @@ export function parseResumeMarkdown(md: string, baseResume?: string): ResumeData
   }
   if (!data.summary.trim()) {
     data.summary = extractSummaryFromText(baseResume);
+  }
+  if (experienceNeedsFallback(data.experience)) {
+    const baseExp = base.experience;
+    if (baseExp.some((job) => job.bullets.length > 0)) {
+      data.experience = baseExp;
+    }
   }
   return data;
 }

@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import PizZip from "pizzip";
-import { parseResumeMarkdown } from "./parse-resume-markdown";
+import { parseResumeMarkdown, hasUsableExperience } from "./parse-resume-markdown";
 import { buildDocumentBodyXml, buildHyperlinkRels, type HyperlinkRel } from "./template-docx-xml";
 import { buildTemplateHeaderXml } from "./template-header-xml";
 
@@ -66,6 +66,12 @@ export function fillTemplateDocx(markdown: string, baseResume?: string): Buffer 
   if (!data.summary.trim()) {
     throw new Error(
       "Resume is missing a Summary section. Please regenerate — the LLM output did not include a summary."
+    );
+  }
+
+  if (!hasUsableExperience(data.experience)) {
+    throw new Error(
+      "Resume is missing work experience content. Please regenerate — experience bullets were not parsed."
     );
   }
 
