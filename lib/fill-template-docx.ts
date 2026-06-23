@@ -62,6 +62,13 @@ export function fillTemplateDocx(markdown: string, baseResume?: string): Buffer 
 
   const zip = new PizZip(fs.readFileSync(TEMPLATE_PATH));
   const data = parseResumeMarkdown(markdown, baseResume);
+
+  if (!data.summary.trim()) {
+    throw new Error(
+      "Resume is missing a Summary section. Please regenerate — the LLM output did not include a summary."
+    );
+  }
+
   const { certLinks, rels } = buildHyperlinkRels(data);
   const headerXml = buildTemplateHeaderXml(data);
   const contentXml = buildDocumentBodyXml(data, certLinks);

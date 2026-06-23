@@ -204,6 +204,118 @@ function normalizeSection(title: string): string {
   return title.toLowerCase().replace(/[^a-z& ]/g, "").trim();
 }
 
+function isSummarySection(section: string): boolean {
+  return section.includes("summary") || section.includes("profile");
+}
+
+type ParsedSectionHeader = {
+  section: string;
+  inlineContent?: string;
+};
+
+function detectSectionHeader(line: string): ParsedSectionHeader | null {
+  const trimmed = line.trim();
+  if (!trimmed || /^#{1,6}\s+/.test(trimmed)) return null;
+
+  const boldOnly = trimmed.match(/^\*\*([^*]+)\*\*\s*:?\s*$/);
+  if (boldOnly) {
+    return { section: normalizeSection(boldOnly[1]) };
+  }
+
+  const boldInline = trimmed.match(/^\*\*([^*]+)\*\*\s*:+\s*(.+)$/);
+  if (boldInline) {
+    return {
+      section: normalizeSection(boldInline[1]),
+      inlineContent: boldInline[2],
+    };
+  }
+
+  const plain = stripInline(trimmed);
+  if (/^(professional\s+)?summary(\s+of\s+qualifications)?$/i.test(plain)) {
+    return { section: "summary" };
+  }
+  if (/^profile$/i.test(plain)) return { section: "profile" };
+  if (/^education$/i.test(plain)) return { section: "education" };
+  if (/^(work\s+)?experience$/i.test(plain) || /^professional\s+experience$/i.test(plain)) {
+    return { section: "experience" };
+  }
+  if (/^skills$/i.test(plain) || /^technical\s+skills$/i.test(plain)) {
+    return { section: "skills" };
+  }
+  if (/^(licenses?\s*&?\s*)?certifications?$/i.test(plain)) {
+    return { section: "certifications" };
+  }
+
+  return null;
+}
+
+function applySectionHeader(
+  header: ParsedSectionHeader,
+  ctx: {
+    flushSummary: () => void;
+    flushJob: () => void;
+    flushContact: () => void;
+    flushEducation: () => void;
+    setSection: (s: string) => void;
+    setExpectRoleLine: (v: boolean) => void;
+    summaryLines: string[];
+  }
+): void {
+  ctx.flushSummary();
+  ctx.flushJob();
+  ctx.flushContact();
+  ctx.flushEducation();
+  ctx.setSection(header.section);
+  ctx.setExpectRoleLine(false);
+  if (header.inlineContent && isSummarySection(header.section)) {
+    ctx.summaryLines.push(stripInline(header.inlineContent));
+  }
+}
+
+/** Scan markdown for summary text when the main parser misses it. */
+export function extractSummaryFromText(text: string): string {
+  const lines = text.split(/\n/);
+  let inSummary = false;
+  const summaryLines: string[] = [];
+
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      if (inSummary && summaryLines.length) continue;
+      continue;
+    }
+
+    const mdHeading = trimmed.match(/^#{1,6}\s+(.*)$/);
+    if (mdHeading) {
+      const sec = normalizeSection(stripInline(mdHeading[1]));
+      if (isSummarySection(sec)) {
+        inSummary = true;
+        continue;
+      }
+      if (inSummary) break;
+      continue;
+    }
+
+    const header = detectSectionHeader(raw);
+    if (header) {
+      if (isSummarySection(header.section)) {
+        inSummary = true;
+        if (header.inlineContent) summaryLines.push(stripInline(header.inlineContent));
+        continue;
+      }
+      if (inSummary) break;
+      continue;
+    }
+
+    if (inSummary) {
+      if (detectSectionHeader(raw)) break;
+      summaryLines.push(stripInline(trimmed));
+    }
+  }
+
+  return summaryLines.join(" ").trim();
+}
+
 const DEGREE_HINT_RE =
   /\b(?:bachelor|master|associate|doctor|ph\.?d\.?|b\.?s\.?|b\.?a\.?|m\.?s\.?|m\.?a\.?|mba|degree|diploma|gpa)\b/i;
 
@@ -335,6 +447,19 @@ function parseResumeMarkdownCore(md: string): ResumeData {
         continue;
       }
 
+      if (level === 3) {
+        const secNorm = normalizeSection(stripInline(content));
+        if (isSummarySection(secNorm)) {
+          flushSummary();
+          flushJob();
+          flushContact();
+          flushEducation();
+          section = secNorm;
+          expectRoleLine = false;
+          continue;
+        }
+      }
+
       if (level === 3 && section.includes("education")) {
         flushEducation();
         const parts = content.split("|").map((s) => s.trim());
@@ -373,7 +498,40 @@ function parseResumeMarkdownCore(md: string): ResumeData {
       flushContact();
     }
 
-    if (section.includes("summary") || section.includes("profile")) {
+    const sectHeader = detectSectionHeader(line);
+    if (sectHeader) {
+      applySectionHeader(sectHeader, {
+        flushSummary,
+        flushJob,
+        flushContact,
+        flushEducation,
+        setSection: (s) => {
+          section = s;
+        },
+        setExpectRoleLine: (v) => {
+          expectRoleLine = v;
+        },
+        summaryLines,
+      });
+      continue;
+    }
+
+    if (section === "header" && !expectContact) {
+      const plain = stripInline(line);
+      if (
+        plain.length >= 50 &&
+        !isContactLikeLine(line) &&
+        !DATE_RANGE_RE.test(plain) &&
+        !/^[-*]\s/.test(line.trim()) &&
+        !DEGREE_HINT_RE.test(plain)
+      ) {
+        section = "summary";
+        summaryLines.push(plain);
+        continue;
+      }
+    }
+
+    if (isSummarySection(section)) {
       summaryLines.push(stripInline(line));
       continue;
     }
@@ -511,6 +669,10 @@ function parseResumeMarkdownCore(md: string): ResumeData {
 
 export function parseResumeMarkdown(md: string, baseResume?: string): ResumeData {
   const data = parseResumeMarkdownCore(md);
+  if (!data.summary.trim()) {
+    data.summary = extractSummaryFromText(md);
+  }
+
   if (!baseResume?.trim()) return data;
 
   const base = parseResumeMarkdownCore(baseResume);
@@ -520,6 +682,9 @@ export function parseResumeMarkdown(md: string, baseResume?: string): ResumeData
   }
   if (!data.contact.linkedin) {
     data.contact.linkedin = base.contact.linkedin ?? extractContactFromText(baseResume).linkedin;
+  }
+  if (!data.summary.trim()) {
+    data.summary = extractSummaryFromText(baseResume);
   }
   return data;
 }

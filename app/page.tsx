@@ -16,9 +16,6 @@ type SlotState = {
 };
 
 const SLOT_COUNT = 4;
-const GENERATION_TIMEOUT_MS = 90_000;
-const GENERATION_TIMEOUT_MESSAGE =
-  "Generation stopped after 1 min 30 sec (timeout).";
 
 const SLOT_TITLES = [
   "1 - AI Engineer",
@@ -67,13 +64,11 @@ async function createTemplateDocxBlob(
   content: string,
   filename: string,
   slot: number,
-  baseResume?: string,
-  signal?: AbortSignal
+  baseResume?: string
 ): Promise<Blob> {
   const res = await fetch("/api/docx", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    signal,
     body: JSON.stringify({
       content,
       baseResume: baseResume ?? "",
@@ -382,8 +377,7 @@ export default function Home() {
     generatedFileName: string,
     baseResume: string,
     jobDescription: string,
-    logUsername: string,
-    signal?: AbortSignal
+    logUsername: string
   ): Promise<void> {
     const slotTitle = SLOT_TITLES[slotIndex] ?? `Slot ${slotIndex + 1}`;
     const contentType = res.headers.get("content-type") ?? "";
@@ -419,19 +413,6 @@ export default function Home() {
     let content = "";
     try {
       while (true) {
-        if (signal?.aborted) {
-          await reader.cancel().catch(() => {});
-          updateSlot(slotIndex, { error: GENERATION_TIMEOUT_MESSAGE });
-          void reportCentralLog({
-            username: logUsername,
-            jobDescription,
-            resumeContent: content,
-            filename: generatedFileName,
-            slotTitle,
-            errorMessage: GENERATION_TIMEOUT_MESSAGE,
-          });
-          return;
-        }
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
@@ -473,24 +454,11 @@ export default function Home() {
         });
         return;
       }
-      if (signal?.aborted) {
-        updateSlot(slotIndex, { error: GENERATION_TIMEOUT_MESSAGE });
-        void reportCentralLog({
-          username: logUsername,
-          jobDescription,
-          resumeContent: content,
-          filename: generatedFileName,
-          slotTitle,
-          errorMessage: GENERATION_TIMEOUT_MESSAGE,
-        });
-        return;
-      }
       const blob = await createTemplateDocxBlob(
         content,
         generatedFileName,
         slotIndex,
-        baseResume,
-        signal
+        baseResume
       );
       const blobUrl = URL.createObjectURL(blob);
       updateSlot(slotIndex, {
@@ -510,12 +478,7 @@ export default function Home() {
         slotTitle,
       });
     } catch (err) {
-      const isAbort = err instanceof Error && err.name === "AbortError";
-      const errMsg = isAbort
-        ? GENERATION_TIMEOUT_MESSAGE
-        : err instanceof Error
-          ? err.message
-          : "Stream read failed";
+      const errMsg = err instanceof Error ? err.message : "Stream read failed";
       updateSlot(slotIndex, { error: errMsg });
       void reportCentralLog({
         username: logUsername,
@@ -570,9 +533,6 @@ export default function Home() {
 
     updateSlot(slotIndex, { loading: true, loadingStartedAt: Date.now() });
 
-    const abortController = new AbortController();
-    const timeoutId = setTimeout(() => abortController.abort(), GENERATION_TIMEOUT_MS);
-
     const firstLine = slot.resume.split(/\r?\n/)[0]?.trim() ?? "";
     const nameBase = safeFilenameFromFirstLine(firstLine);
     const filenameBase = getNextDocxSuffix(nameBase);
@@ -582,7 +542,6 @@ export default function Home() {
       const res = await fetchWithRetry("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal: abortController.signal,
         body: JSON.stringify({
           message: merged,
           generatedFileName,
@@ -609,16 +568,10 @@ export default function Home() {
         generatedFileName,
         slot.resume,
         jobDescription,
-        logUsername,
-        abortController.signal
+        logUsername
       );
     } catch (err) {
-      const isAbort = err instanceof Error && err.name === "AbortError";
-      const errMsg = isAbort
-        ? GENERATION_TIMEOUT_MESSAGE
-        : err instanceof Error
-          ? err.message
-          : "Request failed";
+      const errMsg = err instanceof Error ? err.message : "Request failed";
       updateSlot(slotIndex, { error: errMsg });
       void reportCentralLog({
         username: logUsername,
@@ -629,7 +582,6 @@ export default function Home() {
         errorMessage: errMsg,
       });
     } finally {
-      clearTimeout(timeoutId);
       updateSlot(slotIndex, { loading: false, loadingStartedAt: null });
     }
   }
