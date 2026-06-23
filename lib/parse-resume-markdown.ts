@@ -332,6 +332,42 @@ export function extractSummaryFromText(text: string): string {
 const DEGREE_HINT_RE =
   /\b(?:bachelor|master|associate|doctor|ph\.?d\.?|b\.?s\.?|b\.?a\.?|m\.?s\.?|m\.?a\.?|mba|degree|diploma|gpa)\b/i;
 
+const ROLE_HINT_RE =
+  /\b(?:engineer|scientist|manager|lead|analyst|developer|architect|consultant|director|specialist|coordinator|associate|intern|administrator|programmer|designer|officer|head|principal|staff|senior|junior)\b/i;
+
+function looksLikeJobTitle(text: string): boolean {
+  const plain = stripInline(text);
+  if (!plain || plain.length > 90) return false;
+  return ROLE_HINT_RE.test(plain);
+}
+
+function parseExperienceHeadingContent(content: string): {
+  company: string;
+  role: string;
+  period: string;
+  expectRoleLine: boolean;
+} {
+  const parts = content.split("|").map((s) => s.trim());
+  const first = stripInline(parts[0] ?? content);
+
+  if (parts.length >= 2) {
+    const rest = stripInline(parts.slice(1).join(" | "));
+    const periodMatch = rest.match(DATE_RANGE_RE);
+    if (periodMatch) {
+      if (looksLikeJobTitle(first)) {
+        return { company: "", role: first, period: periodMatch[1], expectRoleLine: false };
+      }
+      return { company: first, role: "", period: "", expectRoleLine: true };
+    }
+  }
+
+  if (looksLikeJobTitle(first)) {
+    return { company: "", role: first, period: "", expectRoleLine: false };
+  }
+
+  return { company: first, role: "", period: "", expectRoleLine: true };
+}
+
 function splitSchoolAndDegree(text: string): { school: string; degree: string } | null {
   const plain = stripInline(text).trim();
   if (!plain) return null;
@@ -383,23 +419,35 @@ function parseExperienceHeaderLine(
     const right = stripInline(boldPipe[2]);
     const periodMatch = right.match(DATE_RANGE_RE);
     if (periodMatch) {
-      return { role: left, period: periodMatch[1] };
+      if (looksLikeJobTitle(left)) {
+        return { role: left, period: periodMatch[1] };
+      }
+      return { company: left, period: periodMatch[1] };
+    }
+    if (looksLikeJobTitle(left)) {
+      return { role: left };
     }
     return { company: left };
   }
 
   const boldOnly = line.match(/^\*\*([^*]+)\*\*\s*$/);
   if (boldOnly) {
-    return { company: boldOnly[1].trim() };
+    const text = boldOnly[1].trim();
+    if (looksLikeJobTitle(text)) return { role: text };
+    return { company: text };
   }
 
   const dated = splitDateLine(line);
   if (dated) {
-    return { role: dated.left, period: dated.right };
+    if (looksLikeJobTitle(dated.left)) {
+      return { role: dated.left, period: dated.right };
+    }
+    return { company: dated.left, period: dated.right };
   }
 
   const plain = stripInline(line);
   if (plain && !/^[-*•\d]/.test(line.trim()) && plain.length <= 120) {
+    if (looksLikeJobTitle(plain)) return { role: plain };
     return { company: plain };
   }
 
@@ -430,6 +478,32 @@ export function hasUsableExperience(jobs: ResumeJob[]): boolean {
   return jobs.length > 0 && !experienceNeedsFallback(jobs);
 }
 
+function normalizeExperienceKey(text: string): string {
+  return stripInline(text).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function mergeMissingRolesFromBase(tailored: ResumeJob[], base: ResumeJob[]): ResumeJob[] {
+  if (!base.length) return tailored;
+  return tailored.map((job, index) => {
+    if (job.role.trim()) return job;
+    const byCompany = base.find(
+      (b) =>
+        b.role &&
+        b.company &&
+        job.company &&
+        normalizeExperienceKey(b.company) === normalizeExperienceKey(job.company)
+    );
+    const byIndex = base[index];
+    const source = byCompany ?? (byIndex?.role ? byIndex : null);
+    if (!source?.role) return job;
+    return {
+      ...job,
+      role: source.role,
+      period: job.period || source.period,
+    };
+  });
+}
+
 function parseResumeMarkdownCore(md: string): ResumeData {
   const data: ResumeData = {
     name: "",
@@ -446,6 +520,7 @@ function parseResumeMarkdownCore(md: string): ResumeData {
   let expectContact = false;
   let contactLines: string[] = [];
   let expectRoleLine = false;
+  let expectCompanyLine = false;
   let currentJob: ResumeJob | null = null;
   let summaryLines: string[] = [];
   let educationPending: Partial<ResumeEducation> | null = null;
@@ -546,13 +621,15 @@ function parseResumeMarkdownCore(md: string): ResumeData {
 
       if (level === 3 && (section.includes("experience") || section.includes("employment"))) {
         flushJob();
+        const parsed = parseExperienceHeadingContent(content);
         currentJob = {
-          company: stripInline(content.split("|")[0] ?? content),
-          role: "",
-          period: "",
+          company: parsed.company,
+          role: parsed.role,
+          period: parsed.period,
           bullets: [],
         };
-        expectRoleLine = true;
+        expectRoleLine = parsed.expectRoleLine;
+        expectCompanyLine = !!parsed.role && !parsed.company;
         continue;
       }
     }
@@ -579,6 +656,7 @@ function parseResumeMarkdownCore(md: string): ResumeData {
         },
         setExpectRoleLine: (v) => {
           expectRoleLine = v;
+          if (v) expectCompanyLine = false;
         },
         summaryLines,
       });
@@ -694,14 +772,14 @@ function parseResumeMarkdownCore(md: string): ResumeData {
       const bullet = line.trim().match(/^[-*•]\s+(.*)$/);
       if (bullet && currentJob) {
         currentJob.bullets.push(stripInline(bullet[1]));
-        expectRoleLine = false;
+        if (currentJob.role) expectRoleLine = false;
         continue;
       }
 
       const numbered = line.trim().match(/^\d+\.\s+(.*)$/);
       if (numbered && currentJob) {
         currentJob.bullets.push(stripInline(numbered[1]));
-        expectRoleLine = false;
+        if (currentJob.role) expectRoleLine = false;
         continue;
       }
 
@@ -711,6 +789,11 @@ function parseResumeMarkdownCore(md: string): ResumeData {
           const started = startJob(expHeader, currentJob, flushJob);
           currentJob = started.job;
           expectRoleLine = started.expectRoleLine;
+          expectCompanyLine = !!currentJob.role && !currentJob.company;
+        } else if (expectCompanyLine && expHeader.company) {
+          currentJob.company = expHeader.company;
+          expectCompanyLine = false;
+          expectRoleLine = false;
         } else if (expectRoleLine || (!currentJob.role && expHeader.role)) {
           if (expHeader.role) {
             currentJob.role = expHeader.role;
@@ -719,10 +802,16 @@ function parseResumeMarkdownCore(md: string): ResumeData {
             currentJob.company = expHeader.company;
           }
           expectRoleLine = false;
-        } else {
+          expectCompanyLine = false;
+        } else if (expHeader.role && !expHeader.company && currentJob.company && !currentJob.role) {
+          currentJob.role = expHeader.role;
+          if (expHeader.period) currentJob.period = expHeader.period;
+          expectRoleLine = false;
+        } else if (expHeader.company || expHeader.role) {
           const started = startJob(expHeader, currentJob, flushJob);
           currentJob = started.job;
           expectRoleLine = started.expectRoleLine;
+          expectCompanyLine = !!currentJob.role && !currentJob.company;
         }
         continue;
       }
@@ -730,19 +819,43 @@ function parseResumeMarkdownCore(md: string): ResumeData {
       if (expectRoleLine && currentJob) {
         const dated = splitDateLine(line);
         if (dated) {
-          currentJob.role = dated.left;
-          currentJob.period = dated.right;
-        } else {
+          if (looksLikeJobTitle(dated.left)) {
+            currentJob.role = dated.left;
+            currentJob.period = dated.right;
+          } else {
+            currentJob.company = dated.left;
+            currentJob.period = dated.right;
+          }
+        } else if (looksLikeJobTitle(line)) {
           currentJob.role = stripInline(line);
+        } else {
+          currentJob.company = stripInline(line);
         }
         expectRoleLine = false;
+        expectCompanyLine = false;
+        continue;
+      }
+
+      if (expectCompanyLine && currentJob) {
+        const dated = splitDateLine(line);
+        if (dated && !looksLikeJobTitle(dated.left)) {
+          currentJob.company = dated.left;
+          if (!currentJob.period) currentJob.period = dated.right;
+        } else {
+          currentJob.company = stripInline(line);
+        }
+        expectCompanyLine = false;
         continue;
       }
 
       if (!currentJob) {
         const dated = splitDateLine(line);
         if (dated) {
-          currentJob = { company: dated.left, role: "", period: dated.right, bullets: [] };
+          if (looksLikeJobTitle(dated.left)) {
+            currentJob = { company: "", role: dated.left, period: dated.right, bullets: [] };
+          } else {
+            currentJob = { company: dated.left, role: "", period: dated.right, bullets: [] };
+          }
         }
       }
       continue;
@@ -761,6 +874,14 @@ function parseResumeMarkdownCore(md: string): ResumeData {
   flushEducation();
 
   data.education = data.education.map(normalizeEducationEntry);
+  data.experience = data.experience.map((job) => {
+    if (job.company && job.role) return job;
+    if (job.role && !job.company) return job;
+    if (job.company && looksLikeJobTitle(job.company) && !job.role) {
+      return { ...job, role: job.company, company: "" };
+    }
+    return job;
+  });
 
   return data;
 }
@@ -789,6 +910,8 @@ export function parseResumeMarkdown(md: string, baseResume?: string): ResumeData
     if (baseExp.some((job) => job.bullets.length > 0)) {
       data.experience = baseExp;
     }
+  } else {
+    data.experience = mergeMissingRolesFromBase(data.experience, base.experience);
   }
   return data;
 }

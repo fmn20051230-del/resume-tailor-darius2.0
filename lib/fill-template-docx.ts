@@ -75,6 +75,13 @@ export function fillTemplateDocx(markdown: string, baseResume?: string): Buffer 
     );
   }
 
+  const missingRoles = data.experience.filter((job) => !job.role.trim());
+  if (missingRoles.length > 0) {
+    throw new Error(
+      "Resume is missing job titles in work experience. Please regenerate — role titles were not parsed."
+    );
+  }
+
   const { certLinks, rels } = buildHyperlinkRels(data);
   const headerXml = buildTemplateHeaderXml(data);
   const contentXml = buildDocumentBodyXml(data, certLinks);
