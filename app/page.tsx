@@ -1,6 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import {
+  buildGeneratedFileName,
+  resolveJobTitleForFilename,
+  safeFilenameFromFirstLine,
+} from "@/lib/generated-filename";
 
 type SlotState = {
   resume: string;
@@ -102,84 +107,6 @@ function tryOpenInWord(fileUrl: string): boolean {
   if (!/Windows|Macintosh|Mac OS X/i.test(ua)) return false;
   window.location.href = `ms-word:ofe|u|${encodeURIComponent(fileUrl)}`;
   return true;
-}
-
-/** Characters not allowed in filenames (Windows / cross‑platform). */
-const INVALID_FILENAME_RE = /[\\/:*?"<>|\x00-\x1f#\[\]{};@!$&'`+=]/gi;
-
-const MAX_BASE_LENGTH = 60;
-
-/** Build a safe filename base from the first line of resume text. */
-function safeFilenameFromFirstLine(firstLine: string): string {
-  const cleaned = firstLine
-    .replace(INVALID_FILENAME_RE, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-  const base = cleaned || "resume";
-  return base.length > MAX_BASE_LENGTH ? base.slice(0, MAX_BASE_LENGTH) : base;
-}
-
-const CATEGORY_A = [
-  "Recent",
-  "2026",
-  "Updated",
-  "RecentUpdated",
-  "Recent_updated",
-  "Recent updated",
-  "Latest",
-  "Latest_updated",
-  "Latest updated",
-  "LatestUpdated",
-  "Current",
-  "Final",
-  "2026 updated",
-  "2026_updated",
-  "2026Updated",
-] as const;
-
-const CATEGORY_B = ["Resume", "CV", "Profile"] as const;
-
-const SEPARATORS = ["-", "_", " ", ""] as const;
-
-const TOTAL_COMBOS =
-  2 *
-  SEPARATORS.length *
-  SEPARATORS.length *
-  CATEGORY_A.length *
-  CATEGORY_B.length;
-
-let downloadCounter = 0;
-
-/**
- * Next DOCX filename: name + sep1 + part1 + sep2 + part2.
- * Two separators: one between name and first part (A or B), one between first and second part.
- */
-function getNextDocxSuffix(nameBase: string): string {
-  const index = downloadCounter % TOTAL_COMBOS;
-  downloadCounter += 1;
-
-  const order = index % 2;
-  const sep1Index = Math.floor(index / 2) % SEPARATORS.length;
-  const sep2Index =
-    Math.floor(index / (2 * SEPARATORS.length)) % SEPARATORS.length;
-  const aIndex =
-    Math.floor(index / (2 * SEPARATORS.length * SEPARATORS.length)) %
-    CATEGORY_A.length;
-  const bIndex =
-    Math.floor(
-      index / (2 * SEPARATORS.length * SEPARATORS.length * CATEGORY_A.length)
-    ) % CATEGORY_B.length;
-
-  const sep1 = SEPARATORS[sep1Index];
-  const sep2 = SEPARATORS[sep2Index];
-  const a = CATEGORY_A[aIndex];
-  const b = CATEGORY_B[bIndex];
-
-  const part1 = order === 0 ? a : b;
-  const part2 = order === 0 ? b : a;
-
-  return `${nameBase}${sep1}${part1}${sep2}${part2}`;
 }
 
 const BUILTIN_DEFAULT_PROMPT = `prompt here`;
@@ -535,8 +462,8 @@ export default function Home() {
 
     const firstLine = slot.resume.split(/\r?\n/)[0]?.trim() ?? "";
     const nameBase = safeFilenameFromFirstLine(firstLine);
-    const filenameBase = getNextDocxSuffix(nameBase);
-    const generatedFileName = `${filenameBase}.docx`;
+    const jobTitle = resolveJobTitleForFilename(jobDescription, slotIndex);
+    const generatedFileName = `${buildGeneratedFileName(nameBase, jobTitle)}.docx`;
 
     try {
       const res = await fetchWithRetry("/api/chat", {
