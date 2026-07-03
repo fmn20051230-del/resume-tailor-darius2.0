@@ -32,6 +32,7 @@ export type ResumeCertification = {
 export type ResumeJob = {
   company: string;
   role: string;
+  location?: string;
   period: string;
   bullets: string[];
 };
