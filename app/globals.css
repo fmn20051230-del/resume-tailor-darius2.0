@@ -123,6 +123,21 @@ textarea {
   gap: 1.25rem;
 }
 
+.rt-brand {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.rt-logo {
+  height: 64px;
+  width: auto;
+  flex-shrink: 0;
+  border-radius: 12px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+}
+
 /* ── OpenRouter key bar ── */
 
 .rt-header-controls {

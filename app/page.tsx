@@ -517,13 +517,17 @@ export default function Home() {
     <main className="rt-main">
       <header className="rt-header">
         <div className="rt-header-top">
-          <div>
-            <h1 className="rt-title">Resume Tailor - Darius</h1>
-            <p className="rt-subtitle">
-              LLM content is inserted directly into template.docx. Generate up to{" "}
-              {SLOT_COUNT} tailored resumes in parallel — one shared prompt, separate
-              resume and JD per slot.
-            </p>
+          <div className="rt-brand">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/logo.png" alt="Darius" className="rt-logo" />
+            <div>
+              <h1 className="rt-title">Resume Tailor - Darius</h1>
+              <p className="rt-subtitle">
+                LLM content is inserted directly into template.docx. Generate up to{" "}
+                {SLOT_COUNT} tailored resumes in parallel — one shared prompt, separate
+                resume and JD per slot.
+              </p>
+            </div>
           </div>
 
           <div className="rt-header-controls">
