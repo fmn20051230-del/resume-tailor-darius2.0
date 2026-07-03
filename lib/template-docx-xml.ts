@@ -157,8 +157,7 @@ function skillParagraph(group: ResumeSkillGroup): string {
   return (
     `<w:p>${cachedSkillPPr}` +
     textRun(group.category, RPR_BOLD) +
-    textRun(":", RPR_BODY) +
-    `<w:r>${RPR_BODY}<w:tab/></w:r>` +
+    textRun(": ", RPR_BODY) +
     textRun(group.items, RPR_BODY) +
     `</w:p>`
   );
