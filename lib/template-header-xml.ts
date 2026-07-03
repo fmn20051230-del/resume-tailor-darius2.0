@@ -1,18 +1,15 @@
-import fs from "fs";
-import path from "path";
-import PizZip from "pizzip";
 import type { ResumeContact, ResumeData } from "./parse-resume-markdown";
+import { DARIUS_EMAIL, DARIUS_LOCATION, DARIUS_PHONE } from "./darius-profile";
+import { extractHeaderFromTemplate } from "./template-sections-xml";
 
-const TEMPLATE_DOCX_PATH = path.join(process.cwd(), "lib", "templates", "template2.docx");
-
-/** Template defaults used as replace anchors in template2-header.xml */
+const TEMPLATE_FULL_NAME = "Darius Campbell";
 const TEMPLATE_NAME_FIRST = "Darius";
 const TEMPLATE_NAME_LAST = "Campbell";
 const TEMPLATE_PHONE_AREA = "872";
 const TEMPLATE_PHONE_PREFIX = "234";
 const TEMPLATE_PHONE_LINE = "8844";
-const TEMPLATE_EMAIL = "darius19885@outlook.com";
-const TEMPLATE_CITY = "Fort Worth";
+const TEMPLATE_EMAIL = DARIUS_EMAIL;
+const TEMPLATE_CITY = "Leander";
 const TEMPLATE_STATE = "TX";
 
 function esc(text: string): string {
@@ -21,38 +18,6 @@ function esc(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}
-
-/** Extract name + contact paragraphs from template2.docx (everything before SUMMARY). */
-function extractHeaderFromTemplateDocx(): string {
-  if (!fs.existsSync(TEMPLATE_DOCX_PATH)) {
-    throw new Error("template2.docx not found in lib/templates");
-  }
-  const body = new PizZip(fs.readFileSync(TEMPLATE_DOCX_PATH))
-    .file("word/document.xml")!
-    .asText();
-  const inner = body.slice(body.indexOf("<w:body>") + 8);
-  const summaryIdx = inner.search(/<w:t>SUMMARY<\/w:t>/);
-  if (summaryIdx < 0) {
-    throw new Error("template2.docx missing SUMMARY section");
-  }
-
-  let pos = 0;
-  let header = "";
-  while (pos < summaryIdx) {
-    const end = inner.indexOf("</w:p>", pos);
-    if (end < 0 || end > summaryIdx) break;
-    header += inner.slice(pos, end + 6);
-    pos = end + 6;
-  }
-  if (!header.trim()) {
-    throw new Error("Could not extract header from template2.docx");
-  }
-  return header;
-}
-
-function readHeaderTemplate(): string {
-  return extractHeaderFromTemplateDocx();
 }
 
 function parseUsPhone(phone: string): { area: string; prefix: string; line: string } | null {
@@ -76,16 +41,17 @@ function replaceTextNode(xml: string, from: string, to: string): string {
 }
 
 function fillName(header: string, name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
+  const full = name.trim() || TEMPLATE_FULL_NAME;
+  let h = replaceTextNode(header, TEMPLATE_FULL_NAME, full);
+  const parts = full.split(/\s+/).filter(Boolean);
   const first = parts[0] ?? TEMPLATE_NAME_FIRST;
   const last = parts.slice(1).join(" ") || TEMPLATE_NAME_LAST;
-  let h = replaceTextNode(header, TEMPLATE_NAME_FIRST, first);
+  h = replaceTextNode(h, TEMPLATE_NAME_FIRST, first);
   h = replaceTextNode(h, TEMPLATE_NAME_LAST, last);
   return h;
 }
 
-function fillPhone(header: string, phone?: string): string {
-  if (!phone?.trim()) return header;
+function fillPhone(header: string, phone: string): string {
   const parsed = parseUsPhone(phone);
   if (!parsed) return header;
   let h = replaceTextNode(header, TEMPLATE_PHONE_AREA, parsed.area);
@@ -94,13 +60,11 @@ function fillPhone(header: string, phone?: string): string {
   return h;
 }
 
-function fillEmail(header: string, email?: string): string {
-  if (!email?.trim()) return header;
+function fillEmail(header: string, email: string): string {
   return replaceTextNode(header, TEMPLATE_EMAIL, email.trim());
 }
 
-function fillLocation(header: string, location?: string): string {
-  if (!location?.trim()) return header;
+function fillLocation(header: string, location: string): string {
   const { city, state } = parseCityState(location);
   let h = header;
   if (city) h = replaceTextNode(h, TEMPLATE_CITY, city);
@@ -108,35 +72,20 @@ function fillLocation(header: string, location?: string): string {
   return h;
 }
 
-/** Force Calibri in header XML copied from template (template uses Inter). */
-function applyCalibriFonts(xml: string): string {
-  return xml
-    .replace(/w:ascii="Inter"/g, 'w:ascii="Calibri"')
-    .replace(/w:hAnsi="Inter"/g, 'w:hAnsi="Calibri"')
-    .replace(/w:cs="Inter"/g, 'w:cs="Calibri"')
-    .replace(/w:cstheme="minorHAnsi"/g, 'w:cs="Calibri"');
-}
-
-/** Build header XML by copying template2-header.xml and swapping contact fields. */
+/** Build header from template 3-column table and apply canonical contact fields. */
 export function buildTemplateHeaderXml(data: ResumeData): string {
-  let header = applyCalibriFonts(readHeaderTemplate());
+  let header = extractHeaderFromTemplate();
   if (data.name) header = fillName(header, data.name);
-  header = fillPhone(header, data.contact.phone);
-  header = fillEmail(header, data.contact.email);
-  header = fillLocation(header, data.contact.location);
+  header = fillPhone(header, DARIUS_PHONE);
+  header = fillEmail(header, DARIUS_EMAIL);
+  header = fillLocation(header, DARIUS_LOCATION);
   return header;
 }
 
-export const HEADER_EMAIL_REL = "rId7";
-export const HEADER_LINKEDIN_REL = "rId9";
+export const HEADER_LINKEDIN_REL = "rId8";
 
 const DEFAULT_HEADER_LINKEDIN_URL = "https://www.linkedin.com/in/darius-c-bb25bb413";
 
-export function headerHyperlinkTargets(contact: ResumeContact): { id: string; url: string }[] {
-  const rels: { id: string; url: string }[] = [];
-  if (contact.email?.trim()) {
-    rels.push({ id: HEADER_EMAIL_REL, url: `mailto:${contact.email.trim()}` });
-  }
-  rels.push({ id: HEADER_LINKEDIN_REL, url: DEFAULT_HEADER_LINKEDIN_URL });
-  return rels;
+export function headerHyperlinkTargets(_contact: ResumeContact): { id: string; url: string }[] {
+  return [{ id: HEADER_LINKEDIN_REL, url: DEFAULT_HEADER_LINKEDIN_URL }];
 }

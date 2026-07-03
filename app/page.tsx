@@ -520,7 +520,7 @@ export default function Home() {
           <div>
             <h1 className="rt-title">Resume Tailor - Darius</h1>
             <p className="rt-subtitle">
-              LLM content is inserted directly into template2.docx. Generate up to{" "}
+              LLM content is inserted directly into template.docx. Generate up to{" "}
               {SLOT_COUNT} tailored resumes in parallel — one shared prompt, separate
               resume and JD per slot.
             </p>

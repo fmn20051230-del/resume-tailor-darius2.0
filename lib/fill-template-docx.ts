@@ -1,11 +1,10 @@
 import fs from "fs";
-import path from "path";
 import PizZip from "pizzip";
 import { parseResumeMarkdown, hasUsableExperience } from "./parse-resume-markdown";
+import { mergeDariusEducation, mergeDariusExperience } from "./darius-profile";
 import { buildDocumentBodyXml, buildHyperlinkRels, type HyperlinkRel } from "./template-docx-xml";
 import { buildTemplateHeaderXml } from "./template-header-xml";
-
-const TEMPLATE_PATH = path.join(process.cwd(), "lib", "templates", "template2.docx");
+import { resolveTemplatePath } from "./template-sections-xml";
 
 const HYPERLINK_TYPE =
   "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
@@ -31,7 +30,6 @@ function buildRelsXml(originalXml: string, hyperlinks: HyperlinkRel[]): string {
           usedIds.add(m[1]);
           return `<Relationship Id="${m[1]}" Type="${HYPERLINK_TYPE}" Target="${escapeTarget(updates.get(m[1])!)}" TargetMode="External"/>`;
         }
-        // Keep template hyperlinks still referenced by the header (e.g. rId9 LinkedIn).
         return `<Relationship Id="${m[1]}" Type="${m[2]}" Target="${m[3]}"${m[4] ? ` TargetMode="${m[4]}"` : ""}/>`;
       }
       return `<Relationship Id="${m[1]}" Type="${m[2]}" Target="${m[3]}"${m[4] ? ` TargetMode="${m[4]}"` : ""}/>`;
@@ -56,11 +54,12 @@ function injectBody(templateDocXml: string, bodyInner: string): string {
 }
 
 export function fillTemplateDocx(markdown: string, baseResume?: string): Buffer {
-  if (!fs.existsSync(TEMPLATE_PATH)) {
-    throw new Error("template2.docx not found in lib/templates");
+  const templatePath = resolveTemplatePath();
+  if (!fs.existsSync(templatePath)) {
+    throw new Error("template.docx not found in public/templates");
   }
 
-  const zip = new PizZip(fs.readFileSync(TEMPLATE_PATH));
+  const zip = new PizZip(fs.readFileSync(templatePath));
   const data = parseResumeMarkdown(markdown, baseResume);
 
   if (!data.summary.trim()) {
@@ -74,6 +73,9 @@ export function fillTemplateDocx(markdown: string, baseResume?: string): Buffer 
       "Resume is missing work experience content. Please regenerate — experience bullets were not parsed."
     );
   }
+
+  data.experience = mergeDariusExperience(data.experience);
+  data.education = mergeDariusEducation(data.education);
 
   const missingRoles = data.experience.filter((job) => !job.role.trim());
   if (missingRoles.length > 0) {
