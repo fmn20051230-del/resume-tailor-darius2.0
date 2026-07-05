@@ -33,7 +33,7 @@ const SLOT_TITLES = [
 
 const RESUME_MAX = 20000;
 const JD_MAX = 20000;
-const PROMPT_MAX = 4000;
+const PROMPT_MAX = 20000;
 
 const THEMES = [
   { id: "gold", label: "Dark Luxury" },
