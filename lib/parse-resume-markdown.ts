@@ -209,11 +209,22 @@ function isSummarySection(section: string): boolean {
   return section.includes("summary") || section.includes("profile");
 }
 
+function isSkillsSection(section: string): boolean {
+  const n = normalizeSection(section);
+  if (!n) return false;
+  if (n.includes("skill")) return true;
+  if (/technolog/.test(n) && /language/.test(n)) return true;
+  if (n.startsWith("technolog")) return true;
+  if (n.includes("competenc")) return true;
+  if (n.includes("proficien")) return true;
+  return false;
+}
+
 function isKnownSectionTitle(normalized: string): boolean {
   if (isSummarySection(normalized)) return true;
   if (normalized.includes("education")) return true;
   if (normalized.includes("experience") || normalized.includes("employment")) return true;
-  if (normalized.includes("skill")) return true;
+  if (isSkillsSection(normalized)) return true;
   if (normalized.includes("certification") || normalized.includes("license")) return true;
   return false;
 }
@@ -254,6 +265,12 @@ function detectSectionHeader(line: string): ParsedSectionHeader | null {
     return { section: "experience" };
   }
   if (/^skills$/i.test(plain) || /^technical\s+skills$/i.test(plain)) {
+    return { section: "skills" };
+  }
+  if (/^technologies(\s*(?:&|and)\s*languages?)?$/i.test(plain)) {
+    return { section: "skills" };
+  }
+  if (/^(core\s+)?competencies$/i.test(plain)) {
     return { section: "skills" };
   }
   if (/^(licenses?\s*&?\s*)?certifications?$/i.test(plain)) {
@@ -330,6 +347,49 @@ export function extractSummaryFromText(text: string): string {
   return summaryLines.join(" ").trim();
 }
 
+/** Scan markdown for skill groups when the main parser misses them. */
+export function extractSkillsFromText(text: string): ResumeSkillGroup[] {
+  const lines = text.split(/\n/);
+  let inSkills = false;
+  const skills: ResumeSkillGroup[] = [];
+
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      if (inSkills && skills.length) continue;
+      continue;
+    }
+
+    const mdHeading = trimmed.match(/^#{1,6}\s+(.*)$/);
+    if (mdHeading) {
+      const sec = normalizeSection(stripInline(mdHeading[1]));
+      if (isSkillsSection(sec)) {
+        inSkills = true;
+        continue;
+      }
+      if (inSkills) break;
+      continue;
+    }
+
+    const header = detectSectionHeader(raw);
+    if (header) {
+      if (isSkillsSection(header.section)) {
+        inSkills = true;
+        continue;
+      }
+      if (inSkills) break;
+      continue;
+    }
+
+    if (inSkills) {
+      const skill = parseSkillLine(raw);
+      if (skill) skills.push(skill);
+    }
+  }
+
+  return skills;
+}
+
 const DEGREE_HINT_RE =
   /\b(?:bachelor|master|associate|doctor|ph\.?d\.?|b\.?s\.?|b\.?a\.?|m\.?s\.?|m\.?a\.?|mba|degree|diploma|gpa)\b/i;
 
@@ -402,12 +462,25 @@ function normalizeEducationEntry(edu: ResumeEducation): ResumeEducation {
 }
 
 function parseSkillLine(line: string): ResumeSkillGroup | null {
-  const text = line.trim().replace(/^[-*]\s+/, "");
-  const m = text.match(/^\*\*([^*]+)\*\*\s*:+\s*(.+)$/);
-  if (m) return { category: m[1].trim(), items: m[2].trim() };
+  const text = line.trim().replace(/^[-*•]\s+/, "");
+  if (!text) return null;
+
+  const boldSep = text.match(/^\*\*([^*]+)\*\*\s*[:：\t|–—-]+\s*(.+)$/);
+  if (boldSep) return { category: boldSep[1].trim(), items: boldSep[2].trim() };
+
+  const boldItems = text.match(/^\*\*([^*]+)\*\*\s+(.+)$/);
+  if (boldItems && /[,;]/.test(boldItems[2])) {
+    return { category: boldItems[1].trim(), items: boldItems[2].trim() };
+  }
+
   const plain = stripInline(text);
-  const idx = plain.indexOf(":");
-  if (idx > 0) return { category: plain.slice(0, idx).trim(), items: plain.slice(idx + 1).trim() };
+  const sepIdx = plain.search(/[:：\t|–—-]/);
+  if (sepIdx > 0) {
+    const category = plain.slice(0, sepIdx).trim();
+    const items = plain.slice(sepIdx + 1).replace(/^[\s:：\t|–—-]+/, "").trim();
+    if (category && items) return { category, items };
+  }
+
   return null;
 }
 
@@ -862,7 +935,7 @@ function parseResumeMarkdownCore(md: string): ResumeData {
       continue;
     }
 
-    if (section.includes("skill")) {
+    if (isSkillsSection(section)) {
       const skill = parseSkillLine(line);
       if (skill) data.skills.push(skill);
       continue;
@@ -892,6 +965,9 @@ export function parseResumeMarkdown(md: string, baseResume?: string): ResumeData
   if (!data.summary.trim()) {
     data.summary = extractSummaryFromText(md);
   }
+  if (data.skills.length === 0) {
+    data.skills = extractSkillsFromText(md);
+  }
 
   if (!baseResume?.trim()) return data;
 
@@ -905,6 +981,10 @@ export function parseResumeMarkdown(md: string, baseResume?: string): ResumeData
   }
   if (!data.summary.trim()) {
     data.summary = extractSummaryFromText(baseResume);
+  }
+  if (data.skills.length === 0) {
+    data.skills =
+      base.skills.length > 0 ? base.skills : extractSkillsFromText(baseResume);
   }
   if (experienceNeedsFallback(data.experience)) {
     const baseExp = base.experience;
