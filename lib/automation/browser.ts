@@ -2,7 +2,16 @@ import type { Browser, BrowserContext } from "playwright";
 
 let browserPromise: Promise<Browser> | null = null;
 
+function browserUnavailableError(): Error {
+  return new Error("Cannot find package 'playwright'");
+}
+
 async function getBrowser(): Promise<Browser> {
+  // No Chromium on Vercel serverless — scraper falls back to HTTP fetch.
+  if (process.env.VERCEL || process.env.DISABLE_PLAYWRIGHT === "1") {
+    throw browserUnavailableError();
+  }
+
   if (!browserPromise) {
     browserPromise = (async () => {
       const { chromium } = await import("playwright");

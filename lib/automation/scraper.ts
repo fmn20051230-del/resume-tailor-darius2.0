@@ -1012,7 +1012,7 @@ export async function scrapeJobPage(url: string): Promise<string> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // Browser-missing errors fall through to the shared handler below.
-      if (!/Executable doesn't exist|playwright install|Cannot find module 'playwright'/i.test(msg)) {
+      if (!/Executable doesn't exist|playwright install|Cannot find (?:module|package) 'playwright'/i.test(msg)) {
         throw err;
       }
     }
@@ -1049,14 +1049,16 @@ export async function scrapeJobPage(url: string): Promise<string> {
 
     // Browser missing → tell the user how to enable it, then try a plain fetch.
     if (
-      /Executable doesn't exist|playwright install|Cannot find module 'playwright'|browserType\.launch/i.test(
+      /Executable doesn't exist|playwright install|Cannot find (?:module|package) 'playwright'|browserType\.launch/i.test(
         message
       )
     ) {
       const fallback = await plainFetchFallback(normalized).catch(() => null);
       if (fallback) return fallback;
       throw new Error(
-        "Headless browser not installed. Run: npx playwright install chromium (then restart the dev server)."
+        process.env.VERCEL
+          ? "This job page needs a real browser to load (blocked or JS-rendered). Open the URL locally with Playwright, or paste the JD manually. Automation with headless Chrome works best via npm run dev on your machine."
+          : "Headless browser not installed. Run: npx playwright install chromium (then restart the dev server)."
       );
     }
 
