@@ -17,7 +17,7 @@ const FIELD_SYNONYMS: { key: FieldKey; names: string[] }[] = [
       "job title",
       "role title",
       "job position",
-      "role",
+      "role name",
     ],
   },
   {
@@ -31,32 +31,57 @@ const FIELD_SYNONYMS: { key: FieldKey; names: string[] }[] = [
       "recommended resume",
       "closest resume",
       "role type",
-      "category",
       "slot",
-      "type",
     ],
   },
   {
     key: "title",
-    names: ["resume title", "title", "headline"],
+    names: ["resume title", "title", "headline", "suggested title"],
   },
   {
     key: "summary",
-    names: ["summary", "professional summary", "profile", "objective"],
+    names: [
+      "summary",
+      "summary of the role",
+      "role summary",
+      "job summary",
+      "professional summary",
+      "profile",
+      "objective",
+      "what they are looking for",
+    ],
   },
   {
     key: "experience",
     names: [
       "experience",
+      "experience group",
       "work experience",
       "professional experience",
       "relevant experience",
       "experiences",
+      "domain experience",
+      "knowledge",
+      "domains",
+      "industry",
+      "industries",
     ],
   },
   {
     key: "skills",
-    names: ["skills", "technical skills", "key skills", "core skills", "skill"],
+    names: [
+      "skills",
+      "skills group",
+      "skill group",
+      "technical skills",
+      "key skills",
+      "core skills",
+      "hard skills",
+      "skill",
+      "technologies",
+      "tech stack",
+      "tools",
+    ],
   },
 ];
 
@@ -64,6 +89,11 @@ const SYNONYM_TO_KEY = new Map<string, FieldKey>();
 for (const field of FIELD_SYNONYMS) {
   for (const name of field.names) SYNONYM_TO_KEY.set(name, field.key);
 }
+
+/** Longer labels first so "summary of the role" wins over "summary". */
+const SORTED_SYNONYMS = [...SYNONYM_TO_KEY.entries()].sort(
+  (a, b) => b[0].length - a[0].length
+);
 
 /** JSON keys → field, for when the LLM returns structured JSON. */
 const JSON_KEY_TO_FIELD: Record<string, FieldKey> = {
@@ -83,21 +113,39 @@ const JSON_KEY_TO_FIELD: Record<string, FieldKey> = {
   resumetitle: "title",
   headline: "title",
   summary: "summary",
+  summaryoftherole: "summary",
+  rolesummary: "summary",
   profile: "summary",
   experience: "experience",
+  experiencegroup: "experience",
   workexperience: "experience",
   skills: "skills",
+  skillsgroup: "skills",
   technicalskills: "skills",
+  hardskills: "skills",
 };
 
 function normalizeLabel(raw: string): string {
   return raw
     .toLowerCase()
-    .replace(/\(.*?\)/g, " ") // drop parentheticals like "(closest one)"
+    .replace(/\(.*?\)/g, " ")
     .replace(/[_\-]+/g, " ")
     .replace(/[^a-z0-9 ]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function matchLabelToKey(label: string): FieldKey | null {
+  const norm = normalizeLabel(label);
+  if (!norm) return null;
+  const exact = SYNONYM_TO_KEY.get(norm);
+  if (exact) return exact;
+  for (const [name, key] of SORTED_SYNONYMS) {
+    if (norm === name || norm.startsWith(name + " ") || norm.endsWith(" " + name)) {
+      return key;
+    }
+  }
+  return null;
 }
 
 /** Strip markdown decoration so bold/heading/bullet lines parse uniformly. */
@@ -111,6 +159,23 @@ function stripDecoration(line: string): string {
     .trim();
 }
 
+/**
+ * LLMs often return one blob: "**Resume Type:** 1 **Summary of the Role:** …"
+ * Insert newlines before labeled markers so line-based parsing works.
+ */
+function normalizeExtractionText(raw: string): string {
+  return raw
+    .replace(/\r\n/g, "\n")
+    .replace(/\*\*\s*([^*:\n]{1,80}?)\s*\*\*\s*:/g, "\n**$1:**")
+    .replace(/(?:^|[\s.])(-?summary)\s*:/gi, "\n$1:")
+    .replace(
+      /\b(Resume\s*Type|Summary(?:\s+of\s+the\s+Role)?|Experience(?:\s+Group)?|Skills(?:\s+Group)?|Hard\s*Skills|Title|Company(?:\s+Name)?|Position(?:\s+Name)?)\s*:/gi,
+      "\n$1:"
+    )
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function parseResumeType(value: string): 1 | 2 | 3 | 4 | null {
   if (!value) return null;
   const trimmed = value.trim();
@@ -120,7 +185,7 @@ export function parseResumeType(value: string): 1 | 2 | 3 | 4 | null {
 
   const lower = trimmed.toLowerCase();
   if (/\ba\.?i\.?\s*engineer\b/.test(lower) || lower.includes("ai engineer")) return 1;
-  if (/machine learning|ml engineer/.test(lower)) return 1;
+  if (/machine learning|ml engineer|applied ai/.test(lower)) return 1;
   if (lower.includes("data engineer")) return 2;
   if (lower.includes("data scientist") || lower.includes("data science")) return 3;
   if (lower.includes("data analyst") || lower.includes("data analytics")) return 4;
@@ -172,8 +237,8 @@ function extractSections(text: string): Partial<Record<FieldKey, string>> {
 
     const colonIdx = cleaned.search(/[:|=\-–—]/);
     if (colonIdx > 0) {
-      const label = normalizeLabel(cleaned.slice(0, colonIdx));
-      const key = SYNONYM_TO_KEY.get(label);
+      const label = cleaned.slice(0, colonIdx);
+      const key = matchLabelToKey(label);
       if (key) {
         const inline = cleaned.slice(colonIdx + 1).replace(/^[\s:|=\-–—]+/, "").trim();
         headers.push({ key, lineIndex: i, inlineValue: inline || undefined });
@@ -181,8 +246,7 @@ function extractSections(text: string): Partial<Record<FieldKey, string>> {
       }
     }
 
-    const label = normalizeLabel(cleaned);
-    const key = SYNONYM_TO_KEY.get(label);
+    const key = matchLabelToKey(cleaned);
     if (key) headers.push({ key, lineIndex: i });
   }
 
@@ -204,28 +268,79 @@ function extractSections(text: string): Partial<Record<FieldKey, string>> {
   return result;
 }
 
+/** Pull Group 1/2/3 style blocks into experience/skills when labeled sections are thin. */
+function extractGroupsFallback(raw: string): Partial<Record<FieldKey, string>> {
+  const result: Partial<Record<FieldKey, string>> = {};
+  const groupBlocks = [
+    ...raw.matchAll(
+      /(?:^|\n)\s*(?:\*\*)?(?:group\s*[1-9]|experience(?:\s+group)?|skills?(?:\s+group)?|hard\s*skills)(?:\*\*)?\s*[:\-–—]\s*([^\n]+(?:\n(?!\s*(?:\*\*)?(?:group\s*[1-9]|resume\s*type|summary|title|mentorship|leadership)\b)[^\n]+)*)/gi
+    ),
+  ];
+
+  const chunks: string[] = [];
+  for (const m of groupBlocks) {
+    const label = m[0].split(/[:\-–—]/)[0] ?? "";
+    const body = (m[1] ?? "").trim();
+    if (!body) continue;
+    const key = matchLabelToKey(label);
+    if (key === "skills" || /skill/i.test(label)) {
+      result.skills = result.skills ? `${result.skills}, ${body}` : body;
+    } else if (key === "experience" || /experience|group\s*1/i.test(label)) {
+      result.experience = result.experience ? `${result.experience}, ${body}` : body;
+    } else {
+      chunks.push(body);
+    }
+  }
+
+  if (chunks.length) {
+    if (!result.experience) result.experience = chunks[0];
+    if (!result.skills && chunks.length > 1) result.skills = chunks.slice(1).join(", ");
+    else if (!result.skills) result.skills = chunks.join(", ");
+  }
+
+  return result;
+}
+
 /** Last-resort scan of the whole response for a resume type value. */
 function findResumeTypeAnywhere(raw: string): 1 | 2 | 3 | 4 | null {
   const labelled = raw.match(
-    /resume\s*[_\- ]*(?:type|slot|category|number)[^\n0-9a-z]*([1-4])\b/i
+    /resume\s*[_\- ]*(?:type|slot|category|number)[^\n0-9a-z]{0,40}([1-4])\b/i
   );
   if (labelled) return Number(labelled[1]) as 1 | 2 | 3 | 4;
 
   const labelledRole = raw.match(
-    /resume\s*[_\- ]*(?:type|slot|category)[^\n]*?(ai engineer|machine learning|ml engineer|data engineer|data scientist|data science|data analyst|data analytics)/i
+    /resume\s*[_\- ]*(?:type|slot|category)[^\n]*?(ai engineer|machine learning|ml engineer|applied ai|data engineer|data scientist|data science|data analyst|data analytics)/i
   );
   if (labelledRole) return parseResumeType(labelledRole[1]);
 
-  // Absolute last resort: first role mention in the response.
   return parseResumeType(raw);
+}
+
+function mergeSections(
+  ...parts: Array<Partial<Record<FieldKey, string>> | null | undefined>
+): Partial<Record<FieldKey, string>> {
+  const out: Partial<Record<FieldKey, string>> = {};
+  for (const part of parts) {
+    if (!part) continue;
+    for (const [k, v] of Object.entries(part) as [FieldKey, string][]) {
+      if (v?.trim() && !out[k]?.trim()) out[k] = v.trim();
+    }
+  }
+  return out;
 }
 
 export function parseExtractionResponse(
   raw: string,
   context?: { rawJd?: string; jobUrl?: string }
 ): ExtractedJobData {
+  const normalized = normalizeExtractionText(raw);
   const json = tryParseJson(raw);
-  const sections = json ?? extractSections(raw);
+  const sections = mergeSections(
+    json,
+    extractSections(normalized),
+    extractSections(raw),
+    extractGroupsFallback(normalized)
+  );
 
   let resumeType = parseResumeType(sections.resumeType ?? "");
   if (!resumeType) resumeType = findResumeTypeAnywhere(raw);
@@ -237,12 +352,17 @@ export function parseExtractionResponse(
     );
   }
 
-  const companyNameParsed = (sections.companyName ?? "").trim();
-  const positionNameParsed = (sections.positionName ?? "").trim();
-  const summary = (sections.summary ?? "").trim();
-  const experience = (sections.experience ?? "").trim();
-  const skills = (sections.skills ?? "").trim();
-  const titleParsed = (sections.title ?? "").trim();
+  let companyNameParsed = (sections.companyName ?? "").trim();
+  let positionNameParsed = (sections.positionName ?? "").trim();
+  let summary = (sections.summary ?? "").trim();
+  let experience = (sections.experience ?? "").trim();
+  let skills = (sections.skills ?? "").trim();
+  let titleParsed = (sections.title ?? "").trim();
+
+  // Salvage: enough signal to continue — tailor uses full raw when sections are thin.
+  if (!summary && !experience && !skills && raw.trim().length > 80) {
+    summary = raw.trim();
+  }
 
   if (!summary && !experience && !skills) {
     const snippet = raw.trim().slice(0, 240).replace(/\s+/g, " ");

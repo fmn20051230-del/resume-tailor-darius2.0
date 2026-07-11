@@ -82,6 +82,12 @@
   text-decoration: none;
   font-size: 0.88rem;
   transition: background 0.15s, color 0.15s;
+  width: 100%;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
 }
 
 .art-nav-link:hover {
@@ -93,6 +99,10 @@
   background: var(--art-green-dim);
   color: var(--art-green);
   font-weight: 600;
+}
+
+.art-tab-panel--hidden {
+  display: none !important;
 }
 
 .art-nav-icon {

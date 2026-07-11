@@ -219,4 +219,13 @@ write title of resume top line. make title simple similar to JD
 - make 3 or more group and align all skills and exp a inline without bullets
 - do not include the title
 
-separate each skill by comma.`;
+separate each skill by comma.
+
+IMPORTANT — use exactly these labels on their own lines (no intro prose before them):
+Resume Type: <1-4>
+Title: <short title>
+Summary: <role summary>
+Experience: <comma-separated domains, industries, knowledge keywords>
+Skills: <comma-separated hard skills and technologies>
+Mentorship: <yes|no>
+Leadership: <yes|no>`;

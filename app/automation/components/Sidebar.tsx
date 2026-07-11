@@ -1,16 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { useAutomationTab, type AutomationTab } from "../tab-context";
 
-const NAV = [
-  { href: "/automation", label: "Dashboard", icon: "▦" },
-  { href: "/automation/settings", label: "Settings", icon: "⚙" },
-  { href: "/", label: "Manual Tailor", icon: "✎" },
-] as const;
+const INTERNAL_NAV: { tab: AutomationTab; label: string; icon: string }[] = [
+  { tab: "dashboard", label: "Dashboard", icon: "▦" },
+  { tab: "settings", label: "Settings", icon: "⚙" },
+];
 
 export function AutomationSidebar() {
-  const pathname = usePathname();
+  const { tab, setTab } = useAutomationTab();
 
   return (
     <aside className="art-sidebar">
@@ -23,27 +22,29 @@ export function AutomationSidebar() {
       </div>
 
       <nav className="art-nav">
-        {NAV.map((item) => {
-          const active =
-            item.href === "/automation"
-              ? pathname === "/automation"
-              : pathname.startsWith(item.href) && item.href !== "/";
+        {INTERNAL_NAV.map((item) => {
+          const active = tab === item.tab;
           return (
-            <Link
-              key={item.href}
-              href={item.href}
+            <button
+              key={item.tab}
+              type="button"
               className={`art-nav-link${active ? " art-nav-link--active" : ""}`}
+              onClick={() => setTab(item.tab)}
             >
               <span className="art-nav-icon">{item.icon}</span>
               {item.label}
-            </Link>
+            </button>
           );
         })}
+        <Link href="/" className="art-nav-link">
+          <span className="art-nav-icon">✎</span>
+          Manual Tailor
+        </Link>
       </nav>
 
       <div className="art-sidebar-foot">
         <p className="art-sidebar-note">
-          Paste URLs on Dashboard → each job saves a folder with DOCX, PDF, URL, and extracted JD.
+          Paste URLs on Dashboard. Settings stay on this page so an active batch is not interrupted.
         </p>
       </div>
     </aside>
