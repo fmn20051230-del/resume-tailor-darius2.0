@@ -15,8 +15,12 @@ import {
 import { sanitizeResumeNamePrefix } from "@/lib/automation/folder-output";
 
 export const dynamic = "force-dynamic";
-/** Vercel Hobby max is 60s; Pro is 300s. Local `next dev` is unaffected. */
-export const maxDuration = 60;
+/**
+ * Vercel kills this SSE handler when maxDuration is hit.
+ * Hobby max ≈ 300s; Pro can go higher. Local `next dev` has no such cap —
+ * that is why batches finish in 1–2 min/job locally but stall/die on Vercel.
+ */
+export const maxDuration = 300;
 
 type RunBody = {
   urlsText?: string;

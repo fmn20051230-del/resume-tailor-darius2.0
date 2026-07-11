@@ -507,6 +507,10 @@ export default function AutomationDashboard() {
         : activeJob?.updatedResume;
   const resumeFileBase = sanitizeResumeDisplayName(resumeNamePrefix);
   const numberedUrls = urlsText.split(/\n/).filter((l) => l.trim());
+  const isProductionHost =
+    typeof window !== "undefined" &&
+    window.location.hostname !== "localhost" &&
+    window.location.hostname !== "127.0.0.1";
 
   return (
     <div className="art-dashboard">
@@ -516,6 +520,15 @@ export default function AutomationDashboard() {
           <p className="art-page-sub">Paste job URLs → each result saves to its own folder</p>
         </div>
       </header>
+
+      {isProductionHost && (
+        <div className="art-banner art-banner--warn" role="status">
+          <strong>Vercel limits batch automation.</strong> Localhost finishes in ~1–2 min/job
+          because Playwright + long-running server are available. On Vercel there is no
+          headless browser, and the API is cut off after a few minutes — use{" "}
+          <code>npm run dev</code> on your machine for full batches.
+        </div>
+      )}
 
       <div className="art-dashboard-grid">
         <div className="art-main-col">
