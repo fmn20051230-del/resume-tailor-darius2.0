@@ -154,6 +154,24 @@
   color: var(--art-muted);
 }
 
+.art-banner {
+  margin: 0 0 1rem;
+  padding: 0.85rem 1rem;
+  border-radius: var(--art-radius);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.art-banner--warn {
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+}
+
+.art-banner code {
+  font-size: 0.85em;
+}
+
 .art-saved-badge {
   color: var(--art-green);
   font-size: 0.85rem;
