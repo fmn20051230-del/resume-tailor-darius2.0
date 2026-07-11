@@ -33,7 +33,14 @@ export async function POST(request: NextRequest) {
   try {
     const buffer = fillTemplateDocx(content, baseResume);
 
-    if (typeof slot === "number" && Number.isInteger(slot) && slot >= 0 && slot <= 3) {
+    // Persist to disk only for local "Open in Word"; Vercel uses the response blob download.
+    if (
+      !process.env.VERCEL &&
+      typeof slot === "number" &&
+      Number.isInteger(slot) &&
+      slot >= 0 &&
+      slot <= 3
+    ) {
       saveSlotDocx(slot, buffer);
     }
 

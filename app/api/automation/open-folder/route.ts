@@ -7,6 +7,16 @@ import fs from "fs";
 const execAsync = promisify(exec);
 
 export async function POST(request: NextRequest) {
+  if (process.env.VERCEL) {
+    return NextResponse.json(
+      {
+        error:
+          "Opening folders is only available in local development. Download the ZIP in your browser instead.",
+      },
+      { status: 400 }
+    );
+  }
+
   let body: { folderPath?: string };
   try {
     body = await request.json();

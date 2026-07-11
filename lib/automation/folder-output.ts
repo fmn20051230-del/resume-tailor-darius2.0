@@ -1,7 +1,12 @@
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 const INVALID_SEGMENT_RE = /[\\/:*?"<>|\x00-\x1f#]/g;
+
+function isServerless(): boolean {
+  return Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+}
 
 export function sanitizeFolderSegment(text: string, maxLength = 80): string {
   return text
@@ -34,7 +39,14 @@ export function buildFolderName(
   return `${num}_${company}_${position}`;
 }
 
+/**
+ * Local: project `output/` (or absolute path).
+ * Vercel/serverless: only `/tmp` is writable — zip download still works in the browser.
+ */
 export function resolveOutputRoot(outputDir: string): string {
+  if (isServerless()) {
+    return path.join(os.tmpdir(), "resume-tailor-output");
+  }
   const trimmed = outputDir.trim() || "output";
   return path.isAbsolute(trimmed) ? trimmed : path.join(process.cwd(), trimmed);
 }
