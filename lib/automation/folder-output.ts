@@ -112,7 +112,32 @@ export async function saveJobArtifacts(options: {
   return { folderPath, docxPath, pdfPath, resumeBaseName };
 }
 
-/** Build a ZIP of completed job folders (same process — required on Vercel before /tmp is lost). */
+export type ZipFolderEntry = {
+  folderName: string;
+  files: { name: string; data: Buffer }[];
+};
+
+/** Build ZIP from in-memory job folders (preferred on Vercel — does not depend on /tmp lasting). */
+export function buildZipFromEntries(entries: ZipFolderEntry[]): Buffer {
+  const zip = new AdmZip();
+  let added = 0;
+
+  for (const entry of entries) {
+    const folder = sanitizeFolderSegment(entry.folderName) || "job";
+    for (const file of entry.files) {
+      if (!file.data?.length) continue;
+      zip.addFile(`${folder}/${file.name}`, file.data);
+      added++;
+    }
+  }
+
+  if (added === 0) {
+    throw new Error("No batch files found to zip");
+  }
+  return zip.toBuffer();
+}
+
+/** Build a ZIP of completed job folders from disk (local / same-process /tmp). */
 export function buildZipBuffer(folderPaths: string[], outputRoot: string): Buffer {
   const zip = new AdmZip();
   const root = path.resolve(outputRoot);

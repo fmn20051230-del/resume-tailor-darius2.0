@@ -3,7 +3,7 @@ import { scrapeJobPage } from "./scraper";
 import { extractJobData } from "./extractor";
 import { buildTailorJobDescription } from "./parse-extraction";
 import { resumeTypeToSlotIndex, slotLabel } from "./slot-router";
-import { buildFolderName, buildZipBuffer, clearOutputDirectory, resolveOutputRoot, saveJobArtifacts } from "./folder-output";
+import { buildFolderName, buildZipFromEntries, clearOutputDirectory, saveJobArtifacts, type ZipFolderEntry } from "./folder-output";
 import { convertDocxToPdf } from "./docx-to-pdf";
 import {
   MAX_RESUME_GENERATE_ATTEMPTS,
@@ -119,6 +119,7 @@ export async function runAutomationPipeline(
   let failed = 0;
   let skipped = 0;
   const completedFolderPaths: string[] = [];
+  const zipEntries: ZipFolderEntry[] = [];
   const concurrency = clampConcurrency(config.concurrency);
   const withPdfLock = createPdfLock();
   const batchStartedAt = Date.now();
@@ -336,6 +337,19 @@ export async function runAutomationPipeline(
         );
 
         completedFolderPaths.push(saved.folderPath);
+
+        const textFiles: ZipFolderEntry["files"] = [
+          { name: "job_url.txt", data: Buffer.from(url + "\n", "utf8") },
+          { name: "raw_jd.txt", data: Buffer.from(rawText, "utf8") },
+          { name: "extracted_jd.txt", data: Buffer.from(extracted.raw, "utf8") },
+          { name: "updated_resume.md", data: Buffer.from(resumeMarkdown, "utf8") },
+          { name: `${saved.resumeBaseName}.docx`, data: docxBuffer },
+        ];
+        if (pdfBuffer?.length) {
+          textFiles.push({ name: `${saved.resumeBaseName}.pdf`, data: pdfBuffer });
+        }
+        zipEntries.push({ folderName, files: textFiles });
+
         emit({
           type: "job_complete",
           index,
@@ -346,8 +360,15 @@ export async function runAutomationPipeline(
           slotLabel: slotName,
           hasPdf,
           elapsedMs: jobElapsed(),
-          docxBase64: docxBuffer.toString("base64"),
-          resumeFileName: `${saved.resumeBaseName}.docx`,
+          artifacts: {
+            jobUrl: url,
+            rawJd: rawText,
+            extractedJd: extracted.raw,
+            resumeMarkdown,
+            docxBase64: docxBuffer.toString("base64"),
+            resumeFileName: `${saved.resumeBaseName}.docx`,
+            pdfBase64: pdfBuffer?.length ? pdfBuffer.toString("base64") : undefined,
+          },
         });
         completed++;
       } catch (err) {
@@ -363,12 +384,9 @@ export async function runAutomationPipeline(
 
   let zipBase64: string | undefined;
   let zipFileName: string | undefined;
-  if (completedFolderPaths.length > 0) {
+  if (zipEntries.length > 0) {
     try {
-      const zipBuf = buildZipBuffer(
-        completedFolderPaths,
-        resolveOutputRoot(config.outputDir)
-      );
+      const zipBuf = buildZipFromEntries(zipEntries);
       zipBase64 = zipBuf.toString("base64");
       zipFileName = `${config.resumeNamePrefix}_resumes.zip`;
     } catch (err) {

@@ -155,8 +155,13 @@ export default function AutomationDashboard() {
 
   const stopRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
-  /** DOCX files from this batch — used when server ZIP can't be fetched (Vercel /tmp). */
-  const batchFilesRef = useRef<{ folderName: string; fileName: string; base64: string }[]>([]);
+  /** Full per-job files for browser ZIP fallback (Vercel). */
+  const batchFilesRef = useRef<
+    {
+      folderName: string;
+      files: { fileName: string; base64: string }[];
+    }[]
+  >([]);
 
   useEffect(() => {
     if (!running && !batchStartedAt) return;
@@ -291,12 +296,34 @@ export default function AutomationDashboard() {
         return;
       }
       if (event.type === "job_complete") {
-        if (event.docxBase64 && event.resumeFileName) {
-          batchFilesRef.current.push({
-            folderName: event.folderName,
-            fileName: event.resumeFileName,
-            base64: event.docxBase64,
-          });
+        if (event.artifacts) {
+          const a = event.artifacts;
+          const files: { fileName: string; base64: string }[] = [
+            {
+              fileName: "job_url.txt",
+              base64: btoa(unescape(encodeURIComponent(a.jobUrl + "\n"))),
+            },
+            {
+              fileName: "raw_jd.txt",
+              base64: btoa(unescape(encodeURIComponent(a.rawJd))),
+            },
+            {
+              fileName: "extracted_jd.txt",
+              base64: btoa(unescape(encodeURIComponent(a.extractedJd))),
+            },
+            {
+              fileName: "updated_resume.md",
+              base64: btoa(unescape(encodeURIComponent(a.resumeMarkdown))),
+            },
+            { fileName: a.resumeFileName, base64: a.docxBase64 },
+          ];
+          if (a.pdfBase64) {
+            files.push({
+              fileName: a.resumeFileName.replace(/\.docx$/i, ".pdf"),
+              base64: a.pdfBase64,
+            });
+          }
+          batchFilesRef.current.push({ folderName: event.folderName, files });
         }
         updateJob(event.index, {
           status: "completed",
@@ -365,12 +392,13 @@ export default function AutomationDashboard() {
 
   /** Minimal store-only ZIP so Vercel can still download when the API zip route has empty /tmp. */
   function zipFilesFromBatch(
-    files: { folderName: string; fileName: string; base64: string }[]
+    jobs: { folderName: string; files: { fileName: string; base64: string }[] }[]
   ): Blob {
     const encoder = new TextEncoder();
     const parts: Uint8Array[] = [];
     const central: Uint8Array[] = [];
     let offset = 0;
+    let fileCount = 0;
 
     const u16 = (n: number) => {
       const b = new Uint8Array(2);
@@ -393,10 +421,9 @@ export default function AutomationDashboard() {
       return out;
     };
 
-    for (const file of files) {
-      const name = `${file.folderName}/${file.fileName}`;
-      const nameBytes = encoder.encode(name);
-      const dataBinary = atob(file.base64);
+    const addFile = (pathName: string, base64: string) => {
+      const nameBytes = encoder.encode(pathName);
+      const dataBinary = atob(base64);
       const data = new Uint8Array(dataBinary.length);
       for (let i = 0; i < dataBinary.length; i++) data[i] = dataBinary.charCodeAt(i);
 
@@ -439,6 +466,13 @@ export default function AutomationDashboard() {
       ]);
       central.push(cen);
       offset += local.length;
+      fileCount++;
+    };
+
+    for (const job of jobs) {
+      for (const file of job.files) {
+        addFile(`${job.folderName}/${file.fileName}`, file.base64);
+      }
     }
 
     const centralDir = concat(central);
@@ -446,8 +480,8 @@ export default function AutomationDashboard() {
       u32(0x06054b50),
       u16(0),
       u16(0),
-      u16(files.length),
-      u16(files.length),
+      u16(fileCount),
+      u16(fileCount),
       u32(centralDir.length),
       u32(offset),
       u16(0),
@@ -664,9 +698,9 @@ export default function AutomationDashboard() {
       {isProductionHost && (
         <div className="art-banner art-banner--warn" role="status">
           <strong>Vercel limits batch automation.</strong> Localhost finishes in ~1–2 min/job
-          because Playwright + long-running server are available. On Vercel there is no
-          headless browser, and the API is cut off after a few minutes — use{" "}
-          <code>npm run dev</code> on your machine for full batches.
+          because Playwright + Word/LibreOffice are available. On Vercel there is no
+          headless browser and <strong>no PDF</strong> (DOCX + MD + JD + URL still download).
+          Prefer <code>npm run dev</code> for full batches with PDF.
         </div>
       )}
 

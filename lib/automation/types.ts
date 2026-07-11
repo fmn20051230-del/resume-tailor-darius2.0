@@ -73,9 +73,16 @@ export type AutomationProgressEvent =
       slotLabel: string;
       hasPdf: boolean;
       elapsedMs: number;
-      /** Present so the browser can rebuild a ZIP when /tmp is gone (Vercel). */
-      docxBase64?: string;
-      resumeFileName?: string;
+      /** Browser ZIP fallback when the in-process archive is missing (Vercel). */
+      artifacts?: {
+        jobUrl: string;
+        rawJd: string;
+        extractedJd: string;
+        resumeMarkdown: string;
+        docxBase64: string;
+        resumeFileName: string;
+        pdfBase64?: string;
+      };
     }
   | { type: "job_failed"; index: number; url: string; error: string; elapsedMs?: number }
   | { type: "job_skipped"; index: number; url: string; error: string; elapsedMs?: number }
