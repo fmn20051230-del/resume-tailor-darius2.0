@@ -65,11 +65,16 @@ async function convertWithLibreOffice(docxBuffer: Buffer): Promise<Buffer | null
         () => reject(new Error("LibreOffice conversion timed out")),
         60_000
       );
-      libre.default.convert(docxBuffer, ".pdf", undefined, (err, data) => {
-        clearTimeout(timer);
-        if (err) reject(err);
-        else resolve(Buffer.isBuffer(data) ? data : Buffer.from(data));
-      });
+      libre.default.convert(
+        docxBuffer,
+        ".pdf",
+        undefined,
+        (err: Error | null, data: Buffer) => {
+          clearTimeout(timer);
+          if (err) reject(err);
+          else resolve(Buffer.isBuffer(data) ? data : Buffer.from(data));
+        }
+      );
     });
     return pdf?.length ? pdf : null;
   } catch (err) {

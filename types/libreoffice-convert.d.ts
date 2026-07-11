@@ -1,12 +1,13 @@
 declare module "libreoffice-convert" {
-  import type { Callback } from "node:util";
+  type ConvertCallback = (err: Error | null, data: Buffer) => void;
 
   function convert(
     document: Buffer,
     format: string,
     filter: string | undefined,
-    callback: Callback<Buffer>
+    callback: ConvertCallback
   ): void;
 
-  export default { convert };
+  const libre: { convert: typeof convert };
+  export default libre;
 }

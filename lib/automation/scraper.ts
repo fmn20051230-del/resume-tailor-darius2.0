@@ -727,7 +727,7 @@ function buildIcimsFetchUrls(parsed: URL, rawUrl: string): string[] {
   if (slug && slug !== "job") {
     urls.add(`${origin}/jobs/${jobId}/${slug}/job?in_iframe=1`);
   }
-  return [...urls].filter(Boolean);
+  return Array.from(urls).filter(Boolean);
 }
 
 async function fetchIcimsHtmlViaHttp(url: string, origin: string): Promise<string | null> {
@@ -931,7 +931,7 @@ export function normalizeJobUrl(rawUrl: string): string {
     return rawUrl;
   }
 
-  for (const [key, value] of [...parsed.searchParams.entries()]) {
+  for (const [key, value] of Array.from(parsed.searchParams.entries())) {
     const decoded = (() => {
       try {
         return decodeURIComponent(value);
