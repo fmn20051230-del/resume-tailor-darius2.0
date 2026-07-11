@@ -44,20 +44,27 @@ export async function completeChat(
   apiKey: string,
   message: string,
   model: string,
-  options?: { reasoning?: boolean; maxRetries?: number }
+  options?: { reasoning?: boolean; maxRetries?: number; signal?: AbortSignal }
 ): Promise<string> {
   const maxRetries = options?.maxRetries ?? 3;
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    if (options?.signal?.aborted) {
+      throw new Error("Resume generation timed out");
+    }
+
     const client = createOpenRouterClient(apiKey);
     try {
-      const response = await client.chat.completions.create({
-        model,
-        messages: [{ role: "user", content: message }],
-        stream: false,
-        ...(options?.reasoning ? { reasoning: { enabled: true } } : {}),
-      } as Parameters<typeof client.chat.completions.create>[0]);
+      const response = await client.chat.completions.create(
+        {
+          model,
+          messages: [{ role: "user", content: message }],
+          stream: false,
+          ...(options?.reasoning ? { reasoning: { enabled: true } } : {}),
+        } as Parameters<typeof client.chat.completions.create>[0],
+        options?.signal ? { signal: options.signal } : undefined
+      );
 
       const content = (response as { choices?: { message?: { content?: string | null } }[] })
         .choices?.[0]?.message?.content;
@@ -66,6 +73,13 @@ export async function completeChat(
       }
       throw new Error("LLM returned empty content");
     } catch (err) {
+      if (options?.signal?.aborted) {
+        throw new Error("Resume generation timed out");
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/aborted|timeout|timed out/i.test(msg)) {
+        throw new Error("Resume generation timed out");
+      }
       lastError = err instanceof Error ? err : new Error("LLM request failed");
       if (attempt < maxRetries) {
         await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));

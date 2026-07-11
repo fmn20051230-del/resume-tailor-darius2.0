@@ -5,7 +5,11 @@ import { buildTailorJobDescription } from "./parse-extraction";
 import { resumeTypeToSlotIndex, slotLabel } from "./slot-router";
 import { buildFolderName, clearOutputDirectory, saveJobArtifacts } from "./folder-output";
 import { convertDocxToPdf } from "./docx-to-pdf";
-import { tailorResume } from "@/lib/tailor-resume";
+import {
+  MAX_RESUME_GENERATE_ATTEMPTS,
+  RESUME_ATTEMPT_TIMEOUT_MS,
+  tailorResume,
+} from "@/lib/tailor-resume";
 import {
   requiresSecurityClearance,
   securityClearanceSkipReason,
@@ -20,7 +24,7 @@ export type PipelineOptions = {
 /** Default matches prior app: several resumes at once on one OpenRouter key. */
 export const DEFAULT_CONCURRENCY = 4;
 export const MAX_CONCURRENCY = 10;
-/** Per-step wall-clock limit; timed-out LLM/scrape steps are retried once. */
+/** Per-step wall-clock limit for scrape / extract / PDF (not resume — resume uses 7m × 3). */
 export const STEP_TIMEOUT_MS = 5 * 60 * 1000;
 
 function clampConcurrency(value: number | undefined): number {
@@ -36,8 +40,8 @@ function formatDuration(ms: number): string {
 }
 
 class StepTimeoutError extends Error {
-  constructor(public readonly stepLabel: string) {
-    super(`Step "${stepLabel}" exceeded ${formatDuration(STEP_TIMEOUT_MS)} and was terminated`);
+  constructor(public readonly stepLabel: string, timeoutMs = STEP_TIMEOUT_MS) {
+    super(`Step "${stepLabel}" exceeded ${formatDuration(timeoutMs)} and was terminated`);
     this.name = "StepTimeoutError";
   }
 }
@@ -48,7 +52,7 @@ async function withTimeout<T>(ms: number, label: string, fn: () => Promise<T>): 
     return await Promise.race([
       fn(),
       new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new StepTimeoutError(label)), ms);
+        timer = setTimeout(() => reject(new StepTimeoutError(label, ms)), ms);
       }),
     ]);
   } finally {
@@ -56,7 +60,7 @@ async function withTimeout<T>(ms: number, label: string, fn: () => Promise<T>): 
   }
 }
 
-/** Run fn; on timeout, retry once (regenerate). */
+/** Run fn; on timeout, retry once (scrape / extract). */
 async function withTimeoutRetry<T>(
   label: string,
   fn: () => Promise<T>,
@@ -255,31 +259,31 @@ export async function runAutomationPipeline(
         let docxBuffer: Buffer;
         let resumeMarkdown: string;
         try {
-          emitStep("resume_generating", "Resume generating");
-          const tailorStarted = Date.now();
-          const tailored = await withTimeoutRetry(
-            "Resume generation",
-            () =>
-              tailorResume({
-                slotIndex,
-                baseResume,
-                jobDescription: tailorJd,
-                tailoringPrompt: config.tailoringPrompt,
-                apiKey: config.apiKey,
-                onAttempt: (attempt, maxAttempts, previousError) => {
-                  if (attempt === 1) return;
-                  emitStep(
-                    "resume_generating",
-                    previousError
-                      ? `Resume regenerating (${attempt}/${maxAttempts}) — ${previousError}`
-                      : `Resume regenerating (${attempt}/${maxAttempts})`
-                  );
-                },
-              }),
-            (msg) => {
-              emitStep("resume_generating", `Resume timed out — regenerating… ${msg}`);
-            }
+          emitStep(
+            "resume_generating",
+            `Resume generating (7 min limit, up to ${MAX_RESUME_GENERATE_ATTEMPTS} attempts)`
           );
+          const tailorStarted = Date.now();
+          // tailorResume owns 7m/attempt × 3 attempts (≤21m). Do not wrap again.
+          const tailored = await tailorResume({
+            slotIndex,
+            baseResume,
+            jobDescription: tailorJd,
+            tailoringPrompt: config.tailoringPrompt,
+            apiKey: config.apiKey,
+            onAttempt: (attempt, maxAttempts, previousError) => {
+              if (attempt === 1) return;
+              const reason = previousError
+                ? previousError.length > 120
+                  ? `${previousError.slice(0, 120)}…`
+                  : previousError
+                : "retrying";
+              emitStep(
+                "resume_generating",
+                `Resume regenerating (${attempt}/${maxAttempts}, ${formatDuration(RESUME_ATTEMPT_TIMEOUT_MS)} limit) — ${reason}`
+              );
+            },
+          });
           docxBuffer = tailored.docxBuffer;
           resumeMarkdown = tailored.content;
           emit({ type: "job_resume_content", index, resumeMarkdown });
