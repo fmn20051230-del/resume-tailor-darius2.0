@@ -1,6 +1,10 @@
 import fs from "fs";
 import PizZip from "pizzip";
-import { parseResumeMarkdown, hasUsableExperience } from "./parse-resume-markdown";
+import {
+  parseResumeMarkdown,
+  hasUsableExperience,
+  stripMarkdownCodeFence,
+} from "./parse-resume-markdown";
 import { mergeDariusEducation, mergeDariusExperience } from "./darius-profile";
 import { buildDocumentBodyXml, buildHyperlinkRels, type HyperlinkRel } from "./template-docx-xml";
 import { buildTemplateHeaderXml } from "./template-header-xml";
@@ -60,7 +64,8 @@ export function fillTemplateDocx(markdown: string, baseResume?: string): Buffer 
   }
 
   const zip = new PizZip(fs.readFileSync(templatePath));
-  const data = parseResumeMarkdown(markdown, baseResume);
+  const cleanedMarkdown = stripMarkdownCodeFence(markdown);
+  const data = parseResumeMarkdown(cleanedMarkdown, baseResume);
 
   if (!data.summary.trim()) {
     throw new Error(

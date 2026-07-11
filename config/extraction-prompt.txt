@@ -1,0 +1,22 @@
+# Default OpenRouter JD extraction prompt.
+# Lines starting with # are ignored. Override via Automation UI or EXTRACTION_PROMPT env.
+
+from JD, you should give me,
+
+- resume Type 1-4 (which one is most similar to: 1-AI Engineer, 2 - Data Engineer, 3-Data Scientist, 4-Data Analyst)
+
+- summary of the role what they are looking for,, as -summary and
+two group - one is experience one and skills,
+- experience should include all domain, industry and all keyword regarding knowledge and technledge,
+- Extract all words (programing language,platform, system, methodology, framework, concept, technology, etc...if you are think it can be used for resume) : hard skills, skills of JD, never miss even one skill, give me as raw data without changing.
+these two group should include all skills and technology of JD
+write title of resume top line. make title simple similar to JD
+- (if JD strongly requires mentorship and leadership experience, give me mentorship yes, leadership : yes), if not, mentorship : no
+- make the title simply based on Data Engineer, Data Scientist,  AI/ML engineer, Data Engineer - AI/ML, Data Analyst, Database Engineer, AI solution ARchitect, software engineer - AI...
+- if you see skill sets like : Fluency with regulations such as ICH GCP, 21 CFR Part 11, and standards such as CDISC (SDTM/ADaM), then change their order arbitary and add alternative one or two. for example, 21 CFR Part 11, alternative2 ICH GCP, alternative1
+
+- do not include degree or certification like MS, BS, Doctor..., AWS Solution Architect
+- make 3 or more group and align all skills and exp a inline without bullets
+- do not include the title
+
+separate each skill by comma.

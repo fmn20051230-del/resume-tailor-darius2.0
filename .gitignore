@@ -35,3 +35,6 @@ next-env.d.ts
 
 # generated resumes (local open)
 .generated-resumes
+
+# automation output folders
+/output

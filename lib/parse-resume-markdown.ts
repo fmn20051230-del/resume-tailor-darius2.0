@@ -206,7 +206,29 @@ function normalizeSection(title: string): string {
 }
 
 function isSummarySection(section: string): boolean {
-  return section.includes("summary") || section.includes("profile");
+  const n = normalizeSection(section);
+  if (!n) return false;
+  if (n.includes("summary") || n.includes("profile")) return true;
+  if (n.includes("overview") || n.includes("objective")) return true;
+  if (n.includes("about me") || n === "about") return true;
+  if (n.includes("qualification") || n.includes("highlight")) return true;
+  return false;
+}
+
+/** Text on the same line as a summary heading, e.g. "## Summary: AI engineer with..." */
+function extractInlineSummaryFromHeading(content: string): string | null {
+  const plain = stripInline(content);
+  const match = plain.match(
+    /^(?:professional\s+)?summary(?:\s+of\s+qualifications)?\s*[:–—-]\s*(.+)$/i
+  );
+  return match?.[1]?.trim() || null;
+}
+
+/** LLMs often wrap the full resume in a markdown code fence. */
+export function stripMarkdownCodeFence(md: string): string {
+  const trimmed = md.trim();
+  const fenced = trimmed.match(/^```(?:markdown|md)?\s*\r?\n([\s\S]*?)\r?\n```\s*$/i);
+  return fenced ? fenced[1].trim() : md;
 }
 
 function isSkillsSection(section: string): boolean {
@@ -256,10 +278,21 @@ function detectSectionHeader(line: string): ParsedSectionHeader | null {
   }
 
   const plain = stripInline(trimmed);
+  const summaryInline = plain.match(
+    /^(?:professional\s+)?summary(?:\s+of\s+qualifications)?\s*:\s*(.+)$/i
+  );
+  if (summaryInline) {
+    return { section: "summary", inlineContent: summaryInline[1].trim() };
+  }
   if (/^(professional\s+)?summary(\s+of\s+qualifications)?$/i.test(plain)) {
     return { section: "summary" };
   }
   if (/^profile$/i.test(plain)) return { section: "profile" };
+  if (/^(career\s+)?overview$/i.test(plain)) return { section: "summary" };
+  if (/^(career\s+)?objective$/i.test(plain)) return { section: "summary" };
+  if (/^about(\s+me)?$/i.test(plain)) return { section: "summary" };
+  if (/^(key\s+)?qualifications$/i.test(plain)) return { section: "summary" };
+  if (/^highlights$/i.test(plain)) return { section: "summary" };
   if (/^education$/i.test(plain)) return { section: "education" };
   if (/^(work\s+)?experience$/i.test(plain) || /^professional\s+experience$/i.test(plain)) {
     return { section: "experience" };
@@ -660,7 +693,14 @@ function parseResumeMarkdownCore(md: string): ResumeData {
         flushJob();
         flushContact();
         flushEducation();
-        section = normalizeSection(stripInline(content));
+        const secNorm = normalizeSection(stripInline(content));
+        if (isSummarySection(secNorm)) {
+          section = "summary";
+          const inline = extractInlineSummaryFromHeading(content);
+          if (inline) summaryLines.push(inline);
+        } else {
+          section = secNorm;
+        }
         expectRoleLine = false;
         continue;
       }
@@ -672,7 +712,9 @@ function parseResumeMarkdownCore(md: string): ResumeData {
           flushJob();
           flushContact();
           flushEducation();
-          section = secNorm;
+          section = "summary";
+          const inline = extractInlineSummaryFromHeading(content);
+          if (inline) summaryLines.push(inline);
           expectRoleLine = false;
           continue;
         }
@@ -961,9 +1003,10 @@ function parseResumeMarkdownCore(md: string): ResumeData {
 }
 
 export function parseResumeMarkdown(md: string, baseResume?: string): ResumeData {
-  const data = parseResumeMarkdownCore(md);
+  const cleaned = stripMarkdownCodeFence(md);
+  const data = parseResumeMarkdownCore(cleaned);
   if (!data.summary.trim()) {
-    data.summary = extractSummaryFromText(md);
+    data.summary = extractSummaryFromText(cleaned);
   }
   if (data.skills.length === 0) {
     data.skills = extractSkillsFromText(md);
@@ -978,9 +1021,6 @@ export function parseResumeMarkdown(md: string, baseResume?: string): ResumeData
   }
   if (!data.contact.linkedin) {
     data.contact.linkedin = base.contact.linkedin ?? extractContactFromText(baseResume).linkedin;
-  }
-  if (!data.summary.trim()) {
-    data.summary = extractSummaryFromText(baseResume);
   }
   if (data.skills.length === 0) {
     data.skills =

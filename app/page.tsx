@@ -3,11 +3,13 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   buildGeneratedFileName,
   resolveJobTitleForFilename,
   safeFilenameFromFirstLine,
 } from "@/lib/generated-filename";
+import { DEFAULT_TAILORING_PROMPT } from "@/lib/default-prompts";
 
 type SlotState = {
   resume: string;
@@ -189,10 +191,8 @@ function tryOpenInWord(fileUrl: string): boolean {
   return true;
 }
 
-const BUILTIN_DEFAULT_PROMPT = `prompt here`;
-
 const envPrompt = process.env.NEXT_PUBLIC_DEFAULT_PROMPT?.trim();
-const DEFAULT_PROMPT = envPrompt || BUILTIN_DEFAULT_PROMPT;
+const DEFAULT_PROMPT = envPrompt || DEFAULT_TAILORING_PROMPT;
 
 const OPENROUTER_KEY_STORAGE = "resume-tailor-openrouter-key";
 const USERNAME_STORAGE = "resume-tailor-username";
@@ -617,6 +617,10 @@ export default function Home() {
             </p>
           </div>
         </div>
+
+        <Link href="/automation" className="rt-link-auto">
+          Automation →
+        </Link>
 
         <div className="rt-theme-select">
           <select

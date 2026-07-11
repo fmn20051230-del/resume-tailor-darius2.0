@@ -1,0 +1,100 @@
+import fs from "fs";
+import path from "path";
+
+const INVALID_SEGMENT_RE = /[\\/:*?"<>|\x00-\x1f#]/g;
+
+export function sanitizeFolderSegment(text: string, maxLength = 80): string {
+  return text
+    .replace(INVALID_SEGMENT_RE, " ")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
+    .slice(0, maxLength) || "Unknown";
+}
+
+export function sanitizeResumeNamePrefix(text: string): string {
+  const cleaned = text
+    .trim()
+    .replace(INVALID_SEGMENT_RE, "_")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
+    .slice(0, 60);
+  return cleaned || "resume";
+}
+
+export function buildFolderName(
+  urlIndex: number,
+  companyName: string,
+  positionName: string
+): string {
+  const num = String(urlIndex).padStart(2, "0");
+  const company = sanitizeFolderSegment(companyName);
+  const position = sanitizeFolderSegment(positionName);
+  return `${num}_${company}_${position}`;
+}
+
+export function resolveOutputRoot(outputDir: string): string {
+  const trimmed = outputDir.trim() || "output";
+  return path.isAbsolute(trimmed) ? trimmed : path.join(process.cwd(), trimmed);
+}
+
+/** Remove all previous batch output before a new run. */
+export function clearOutputDirectory(outputDir: string): void {
+  const root = resolveOutputRoot(outputDir);
+  if (fs.existsSync(root)) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  fs.mkdirSync(root, { recursive: true });
+}
+
+export function ensureUniqueFolder(basePath: string): string {
+  if (!fs.existsSync(basePath)) return basePath;
+  let counter = 2;
+  while (fs.existsSync(`${basePath}_${counter}`)) {
+    counter++;
+  }
+  return `${basePath}_${counter}`;
+}
+
+export type SavedJobArtifacts = {
+  folderPath: string;
+  docxPath: string;
+  pdfPath: string | null;
+  resumeBaseName: string;
+};
+
+export async function saveJobArtifacts(options: {
+  outputDir: string;
+  folderName: string;
+  resumeNamePrefix: string;
+  jobUrl: string;
+  rawJd: string;
+  extractedJd: string;
+  resumeMarkdown: string;
+  docxBuffer: Buffer;
+  pdfBuffer?: Buffer | null;
+}): Promise<SavedJobArtifacts> {
+  const root = resolveOutputRoot(options.outputDir);
+  const folderPath = ensureUniqueFolder(path.join(root, options.folderName));
+  fs.mkdirSync(folderPath, { recursive: true });
+
+  const prefix = sanitizeResumeNamePrefix(options.resumeNamePrefix);
+  const resumeBaseName = `${prefix}_resume`;
+
+  fs.writeFileSync(path.join(folderPath, "job_url.txt"), options.jobUrl + "\n", "utf8");
+  fs.writeFileSync(path.join(folderPath, "raw_jd.txt"), options.rawJd, "utf8");
+  fs.writeFileSync(path.join(folderPath, "extracted_jd.txt"), options.extractedJd, "utf8");
+  fs.writeFileSync(path.join(folderPath, "updated_resume.md"), options.resumeMarkdown, "utf8");
+
+  const docxPath = path.join(folderPath, `${resumeBaseName}.docx`);
+  fs.writeFileSync(docxPath, options.docxBuffer);
+
+  let pdfPath: string | null = null;
+  if (options.pdfBuffer?.length) {
+    pdfPath = path.join(folderPath, `${resumeBaseName}.pdf`);
+    fs.writeFileSync(pdfPath, options.pdfBuffer);
+  }
+
+  return { folderPath, docxPath, pdfPath, resumeBaseName };
+}
