@@ -155,6 +155,8 @@ export default function AutomationDashboard() {
 
   const stopRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  /** DOCX files from this batch — used when server ZIP can't be fetched (Vercel /tmp). */
+  const batchFilesRef = useRef<{ folderName: string; fileName: string; base64: string }[]>([]);
 
   useEffect(() => {
     if (!running && !batchStartedAt) return;
@@ -289,6 +291,13 @@ export default function AutomationDashboard() {
         return;
       }
       if (event.type === "job_complete") {
+        if (event.docxBase64 && event.resumeFileName) {
+          batchFilesRef.current.push({
+            folderName: event.folderName,
+            fileName: event.resumeFileName,
+            base64: event.docxBase64,
+          });
+        }
         updateJob(event.index, {
           status: "completed",
           statusLabel: `Done (${formatElapsed(event.elapsedMs)})`,
@@ -339,9 +348,133 @@ export default function AutomationDashboard() {
     [updateJob]
   );
 
-  async function downloadZip(prefix?: string, folderPaths?: string[]) {
-    if (!settings) return;
+  function triggerBlobDownload(blob: Blob, filename: string) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function downloadBase64Zip(zipBase64: string, zipFileName: string) {
+    const binary = atob(zipBase64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    triggerBlobDownload(new Blob([bytes], { type: "application/zip" }), zipFileName);
+  }
+
+  /** Minimal store-only ZIP so Vercel can still download when the API zip route has empty /tmp. */
+  function zipFilesFromBatch(
+    files: { folderName: string; fileName: string; base64: string }[]
+  ): Blob {
+    const encoder = new TextEncoder();
+    const parts: Uint8Array[] = [];
+    const central: Uint8Array[] = [];
+    let offset = 0;
+
+    const u16 = (n: number) => {
+      const b = new Uint8Array(2);
+      new DataView(b.buffer).setUint16(0, n, true);
+      return b;
+    };
+    const u32 = (n: number) => {
+      const b = new Uint8Array(4);
+      new DataView(b.buffer).setUint32(0, n, true);
+      return b;
+    };
+    const concat = (chunks: Uint8Array[]) => {
+      const len = chunks.reduce((s, c) => s + c.length, 0);
+      const out = new Uint8Array(len);
+      let o = 0;
+      for (const c of chunks) {
+        out.set(c, o);
+        o += c.length;
+      }
+      return out;
+    };
+
+    for (const file of files) {
+      const name = `${file.folderName}/${file.fileName}`;
+      const nameBytes = encoder.encode(name);
+      const dataBinary = atob(file.base64);
+      const data = new Uint8Array(dataBinary.length);
+      for (let i = 0; i < dataBinary.length; i++) data[i] = dataBinary.charCodeAt(i);
+
+      const local = concat([
+        u32(0x04034b50),
+        u16(20),
+        u16(0),
+        u16(0),
+        u16(0),
+        u16(0),
+        u32(0),
+        u32(data.length),
+        u32(data.length),
+        u16(nameBytes.length),
+        u16(0),
+        nameBytes,
+        data,
+      ]);
+      parts.push(local);
+
+      const cen = concat([
+        u32(0x02014b50),
+        u16(20),
+        u16(20),
+        u16(0),
+        u16(0),
+        u16(0),
+        u16(0),
+        u32(0),
+        u32(data.length),
+        u32(data.length),
+        u16(nameBytes.length),
+        u16(0),
+        u16(0),
+        u16(0),
+        u16(0),
+        u32(0),
+        u32(offset),
+        nameBytes,
+      ]);
+      central.push(cen);
+      offset += local.length;
+    }
+
+    const centralDir = concat(central);
+    const end = concat([
+      u32(0x06054b50),
+      u16(0),
+      u16(0),
+      u16(files.length),
+      u16(files.length),
+      u32(centralDir.length),
+      u32(offset),
+      u16(0),
+    ]);
+
+    return new Blob([concat([...parts, centralDir, end])], { type: "application/zip" });
+  }
+
+  async function downloadZip(prefix?: string, folderPaths?: string[], inlineZip?: { base64: string; fileName: string }) {
     const name = (prefix ?? resumeNamePrefix).trim() || "resume";
+    const zipName = `${name}_resumes.zip`;
+
+    if (inlineZip?.base64) {
+      downloadBase64Zip(inlineZip.base64, inlineZip.fileName || zipName);
+      return;
+    }
+
+    if (batchFilesRef.current.length > 0) {
+      try {
+        triggerBlobDownload(zipFilesFromBatch(batchFilesRef.current), zipName);
+        return;
+      } catch {
+        // fall through to API
+      }
+    }
+
+    if (!settings) return;
     const paths = folderPaths ?? batchFolderPaths;
     if (!paths.length) {
       setError("No completed resumes from this batch to download.");
@@ -353,20 +486,19 @@ export default function AutomationDashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           outputDir: settings.outputDir,
-          zipFileName: `${name}_resumes.zip`,
+          zipFileName: zipName,
           folderPaths: paths,
         }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.error ?? "ZIP failed");
+        throw new Error(
+          data.error ??
+            "ZIP failed — on Vercel the temp folder is cleared after the run; re-run and use the automatic download."
+        );
       }
       const blob = await res.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `${name}_resumes.zip`;
-      a.click();
-      URL.revokeObjectURL(a.href);
+      triggerBlobDownload(blob, zipName);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Download failed");
     }
@@ -399,6 +531,7 @@ export default function AutomationDashboard() {
     setFailed(0);
     setSkipped(0);
     setBatchFolderPaths([]);
+    batchFilesRef.current = [];
     setBatchStartedAt(Date.now());
     setBatchElapsedMs(0);
     setJobs(urls.map((u, i) => createJobRow(i + 1, u)));
@@ -407,6 +540,7 @@ export default function AutomationDashboard() {
     abortRef.current = controller;
     let batchCompleted = 0;
     let batchFolders: string[] = [];
+    let inlineZip: { base64: string; fileName: string } | undefined;
 
     try {
       const res = await fetch("/api/automation/run", {
@@ -453,13 +587,19 @@ export default function AutomationDashboard() {
           if (event.type === "batch_complete") {
             batchCompleted = event.completed;
             batchFolders = event.folderPaths;
+            if (event.zipBase64) {
+              inlineZip = {
+                base64: event.zipBase64,
+                fileName: event.zipFileName || `${resumeNamePrefix.trim() || "resume"}_resumes.zip`,
+              };
+            }
           }
           handleEvent(event);
         }
       }
 
       if (batchCompleted > 0 && !stopRef.current) {
-        await downloadZip(resumeNamePrefix.trim(), batchFolders);
+        await downloadZip(resumeNamePrefix.trim(), batchFolders, inlineZip);
       }
     } catch (err) {
       if (err instanceof Error && err.name !== "AbortError") {

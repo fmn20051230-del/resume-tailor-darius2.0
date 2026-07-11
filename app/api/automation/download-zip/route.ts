@@ -50,7 +50,15 @@ export async function POST(request: NextRequest) {
         added++;
       }
       if (added === 0) {
-        return NextResponse.json({ error: "No batch folders found to zip" }, { status: 404 });
+        return NextResponse.json(
+          {
+            error:
+              process.env.VERCEL
+                ? "On Vercel, batch folders are cleared after the run. Re-run generate — the ZIP downloads automatically when the batch finishes."
+                : "No batch folders found to zip",
+          },
+          { status: 404 }
+        );
       }
     } else if (fs.existsSync(root)) {
       zip.addLocalFolder(root);

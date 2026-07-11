@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import AdmZip from "adm-zip";
 
 const INVALID_SEGMENT_RE = /[\\/:*?"<>|\x00-\x1f#]/g;
 
@@ -109,4 +110,24 @@ export async function saveJobArtifacts(options: {
   }
 
   return { folderPath, docxPath, pdfPath, resumeBaseName };
+}
+
+/** Build a ZIP of completed job folders (same process — required on Vercel before /tmp is lost). */
+export function buildZipBuffer(folderPaths: string[], outputRoot: string): Buffer {
+  const zip = new AdmZip();
+  const root = path.resolve(outputRoot);
+  let added = 0;
+
+  for (const folderPath of folderPaths) {
+    const resolved = path.resolve(folderPath);
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) continue;
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) continue;
+    zip.addLocalFolder(resolved, path.basename(resolved));
+    added++;
+  }
+
+  if (added === 0) {
+    throw new Error("No batch folders found to zip");
+  }
+  return zip.toBuffer();
 }

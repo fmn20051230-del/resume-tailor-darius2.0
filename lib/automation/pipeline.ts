@@ -3,7 +3,7 @@ import { scrapeJobPage } from "./scraper";
 import { extractJobData } from "./extractor";
 import { buildTailorJobDescription } from "./parse-extraction";
 import { resumeTypeToSlotIndex, slotLabel } from "./slot-router";
-import { buildFolderName, clearOutputDirectory, saveJobArtifacts } from "./folder-output";
+import { buildFolderName, buildZipBuffer, clearOutputDirectory, resolveOutputRoot, saveJobArtifacts } from "./folder-output";
 import { convertDocxToPdf } from "./docx-to-pdf";
 import {
   MAX_RESUME_GENERATE_ATTEMPTS,
@@ -346,6 +346,8 @@ export async function runAutomationPipeline(
           slotLabel: slotName,
           hasPdf,
           elapsedMs: jobElapsed(),
+          docxBase64: docxBuffer.toString("base64"),
+          resumeFileName: `${saved.resumeBaseName}.docx`,
         });
         completed++;
       } catch (err) {
@@ -359,6 +361,24 @@ export async function runAutomationPipeline(
     options?.shouldStop
   );
 
+  let zipBase64: string | undefined;
+  let zipFileName: string | undefined;
+  if (completedFolderPaths.length > 0) {
+    try {
+      const zipBuf = buildZipBuffer(
+        completedFolderPaths,
+        resolveOutputRoot(config.outputDir)
+      );
+      zipBase64 = zipBuf.toString("base64");
+      zipFileName = `${config.resumeNamePrefix}_resumes.zip`;
+    } catch (err) {
+      console.error(
+        "[zip] Could not build batch ZIP in-process:",
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+
   emit({
     type: "batch_complete",
     completed,
@@ -366,6 +386,8 @@ export async function runAutomationPipeline(
     skipped,
     folderPaths: completedFolderPaths,
     elapsedMs: Date.now() - batchStartedAt,
+    zipBase64,
+    zipFileName,
   });
   return { completed, failed, skipped };
 }

@@ -73,6 +73,9 @@ export type AutomationProgressEvent =
       slotLabel: string;
       hasPdf: boolean;
       elapsedMs: number;
+      /** Present so the browser can rebuild a ZIP when /tmp is gone (Vercel). */
+      docxBase64?: string;
+      resumeFileName?: string;
     }
   | { type: "job_failed"; index: number; url: string; error: string; elapsedMs?: number }
   | { type: "job_skipped"; index: number; url: string; error: string; elapsedMs?: number }
@@ -83,6 +86,9 @@ export type AutomationProgressEvent =
       skipped: number;
       folderPaths: string[];
       elapsedMs: number;
+      /** ZIP built in the same serverless invocation — use this on Vercel. */
+      zipBase64?: string;
+      zipFileName?: string;
     };
 
 export type AutomationRunConfig = {
