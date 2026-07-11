@@ -15,7 +15,8 @@ import {
 import { sanitizeResumeNamePrefix } from "@/lib/automation/folder-output";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 800;
+/** Vercel Hobby max is 60s; Pro is 300s. Local `next dev` is unaffected. */
+export const maxDuration = 60;
 
 type RunBody = {
   urlsText?: string;
