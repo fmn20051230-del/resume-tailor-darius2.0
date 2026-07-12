@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "Server DOCX→PDF unavailable. The app converts in the browser with open-source LibreOffice WASM before ZIP download.",
+            "DOCX→PDF failed (docx-to-pdf-lite). On Vercel the preview engine (docx-preview + PlutoPrint) is used; locally Microsoft Word is preferred.",
         },
         { status: 502 }
       );

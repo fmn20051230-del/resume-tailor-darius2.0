@@ -7,24 +7,47 @@ const onVercel = Boolean(process.env.VERCEL);
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
-    serverComponentsExternalPackages: onVercel
-      ? ["@matbee/libreoffice-converter"]
-      : [
-          "playwright",
-          "playwright-core",
-          "libreoffice-convert",
-          "@matbee/libreoffice-converter",
-        ],
-    // Keep ~246MB LibreOffice WASM out of serverless function bundles.
-    // Browser loads it from /lo-wasm/ static files instead.
+    serverComponentsExternalPackages: [
+      "docx-to-pdf-lite",
+      "plutoprint",
+      "docx-preview",
+      "jsdom",
+      ...(onVercel ? [] : ["playwright", "playwright-core", "libreoffice-convert"]),
+    ],
     outputFileTracingExcludes: {
       "*": [
         "node_modules/playwright/**",
         "node_modules/playwright-core/**",
         "node_modules/libreoffice-convert/**",
         "node_modules/@img/**",
-        "node_modules/@matbee/libreoffice-converter/wasm/**",
+        "node_modules/@matbee/**",
         "public/lo-wasm/**",
+      ],
+    },
+    outputFileTracingIncludes: {
+      "/api/automation/convert-pdf": [
+        "./node_modules/docx-to-pdf-lite/**",
+        "./node_modules/plutoprint/**",
+        "./node_modules/docx-preview/**",
+        "./node_modules/jsdom/**",
+      ],
+      "/api/automation/run-job": [
+        "./node_modules/docx-to-pdf-lite/**",
+        "./node_modules/plutoprint/**",
+        "./node_modules/docx-preview/**",
+        "./node_modules/jsdom/**",
+      ],
+      "/api/automation/generate-attempt": [
+        "./node_modules/docx-to-pdf-lite/**",
+        "./node_modules/plutoprint/**",
+        "./node_modules/docx-preview/**",
+        "./node_modules/jsdom/**",
+      ],
+      "/api/automation/download-zip": [
+        "./node_modules/docx-to-pdf-lite/**",
+        "./node_modules/plutoprint/**",
+        "./node_modules/docx-preview/**",
+        "./node_modules/jsdom/**",
       ],
     },
   },
@@ -39,13 +62,6 @@ const nextConfig = {
           "lib/automation/libreoffice-stub.cjs"
         ),
       };
-    }
-    // Browser LibreOffice converter should not be pulled into the server bundle.
-    if (isServer) {
-      config.externals = config.externals || [];
-      if (Array.isArray(config.externals)) {
-        config.externals.push("@matbee/libreoffice-converter/browser");
-      }
     }
     return config;
   },

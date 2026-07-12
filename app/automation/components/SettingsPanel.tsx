@@ -107,8 +107,9 @@ export function SettingsPanel() {
                 autoComplete="off"
               />
               <p className="art-hint">
-                Not required. Deployed app converts DOCX→PDF with open-source LibreOffice
-                WASM in the browser. ConvertAPI is only a fallback.
+                Not required. Deployed app converts DOCX→PDF with open-source{" "}
+                <code>docx-to-pdf-lite</code> (docx-preview + PlutoPrint). ConvertAPI is
+                only an optional fallback.
               </p>
             </div>
             <div className="art-form-row">
