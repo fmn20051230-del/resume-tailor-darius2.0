@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { convertDocxToPdf } from "@/lib/automation/docx-to-pdf";
+import { convertDocxToPdfDetailed } from "@/lib/automation/docx-to-pdf";
 
 export const maxDuration = 120;
 export const dynamic = "force-dynamic";
@@ -44,12 +44,15 @@ export async function POST(request: NextRequest) {
       : undefined;
 
   try {
-    const pdfBuffer = await convertDocxToPdf(docxBuffer, { convertApiSecret });
+    const { pdf: pdfBuffer, error } = await convertDocxToPdfDetailed(docxBuffer, {
+      convertApiSecret,
+    });
     if (!pdfBuffer?.length) {
       return NextResponse.json(
         {
           error:
-            "DOCX→PDF failed. On Vercel, set ConvertAPI Token in the Dashboard (or CONVERTAPI_SECRET / CONVERTAPI_TOKEN env). Locally, Microsoft Word is preferred when installed.",
+            error ||
+            "DOCX→PDF failed. Paste your ConvertAPI Production token on the Dashboard, or set CONVERTAPI_SECRET / CONVERTAPI_TOKEN on Vercel.",
         },
         { status: 502 }
       );

@@ -574,10 +574,14 @@ export default function AutomationDashboard() {
    * For every DOCX in the batch that is missing a PDF, convert DOCX→PDF via API
    * (no OpenRouter). Sequential to avoid ConvertAPI rate limits.
    */
-  async function ensurePdfsForBatchFiles(): Promise<void> {
+  async function ensurePdfsForBatchFiles(): Promise<{
+    failures: number;
+    lastError?: string;
+  }> {
     const jobs = batchFilesRef.current;
     const convertApiSecret = settings?.convertApiSecret?.trim() || undefined;
     let backfillFailures = 0;
+    let lastError: string | undefined;
 
     for (const job of jobs) {
       const docx = job.files.find((f) => /\.docx$/i.test(f.fileName));
@@ -594,20 +598,22 @@ export default function AutomationDashboard() {
             convertApiSecret,
           }),
         });
+        const data = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          pdfBase64?: string;
+          pdfFileName?: string;
+        };
         if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
+          lastError = data.error ?? `HTTP ${res.status}`;
           console.warn(
             `[pdf] Backfill failed for ${job.folderName}:`,
-            data.error ?? res.status
+            lastError
           );
           backfillFailures++;
           continue;
         }
-        const data = (await res.json()) as {
-          pdfBase64?: string;
-          pdfFileName?: string;
-        };
         if (!data.pdfBase64) {
+          lastError = "Convert API returned no PDF data";
           backfillFailures++;
           continue;
         }
@@ -623,18 +629,12 @@ export default function AutomationDashboard() {
         );
       } catch (err) {
         backfillFailures++;
-        console.warn(
-          `[pdf] Backfill error for ${job.folderName}:`,
-          err instanceof Error ? err.message : err
-        );
+        lastError = err instanceof Error ? err.message : String(err);
+        console.warn(`[pdf] Backfill error for ${job.folderName}:`, lastError);
       }
     }
 
-    if (backfillFailures > 0) {
-      setError(
-        `${backfillFailures} PDF(s) could not be converted from DOCX (docx-preview/PlutoPrint).`
-      );
-    }
+    return { failures: backfillFailures, lastError };
   }
 
   async function downloadZip(prefix?: string, folderPaths?: string[], inlineZip?: { base64: string; fileName: string }) {
@@ -655,12 +655,26 @@ export default function AutomationDashboard() {
           !j.files.some((f) => /\.pdf$/i.test(f.fileName))
       ).length;
       if (missing > 0) {
-        setError(`Converting ${missing} DOCX → PDF…`);
+        setError(`Converting ${missing} DOCX → PDF via ConvertAPI…`);
       }
-      await ensurePdfsForBatchFiles();
+      const { failures, lastError } = await ensurePdfsForBatchFiles();
+      const stillMissing = batchFilesRef.current.filter(
+        (j) =>
+          j.files.some((f) => /\.docx$/i.test(f.fileName)) &&
+          !j.files.some((f) => /\.pdf$/i.test(f.fileName))
+      ).length;
       try {
         triggerBlobDownload(zipFilesFromBatch(batchFilesRef.current), zipName);
-        setError(null);
+        if (stillMissing > 0 || failures > 0) {
+          setError(
+            `ZIP downloaded, but ${stillMissing || failures} PDF(s) missing. ${
+              lastError ||
+              "Check your ConvertAPI Production token on the Dashboard."
+            }`
+          );
+        } else {
+          setError(null);
+        }
         return;
       } catch (err) {
         console.warn("[zip] Client ZIP failed, trying server:", err);

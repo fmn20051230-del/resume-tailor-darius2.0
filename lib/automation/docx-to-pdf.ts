@@ -14,6 +14,7 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 
 const PDF_CONVERT_ATTEMPTS = 3;
+const CONVERT_API_URL = "https://v2.convertapi.com/convert/docx/to/pdf";
 
 function isServerless(): boolean {
   return Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
@@ -68,13 +69,20 @@ async function convertWithDocxToPdfLite(
   }
 }
 
+/** Normalize pasted tokens (strip Bearer prefix / whitespace). */
+export function normalizeConvertApiToken(raw?: string | null): string | null {
+  if (!raw) return null;
+  let token = raw.trim();
+  if (!token) return null;
+  if (/^bearer\s+/i.test(token)) token = token.replace(/^bearer\s+/i, "").trim();
+  return token || null;
+}
+
 export function getConvertApiCredential(override?: string | null): string | null {
-  const fromOverride = override?.trim();
-  if (fromOverride) return fromOverride;
   return (
-    process.env.CONVERTAPI_SECRET?.trim() ||
-    process.env.CONVERTAPI_TOKEN?.trim() ||
-    null
+    normalizeConvertApiToken(override) ||
+    normalizeConvertApiToken(process.env.CONVERTAPI_SECRET) ||
+    normalizeConvertApiToken(process.env.CONVERTAPI_TOKEN)
   );
 }
 
@@ -83,24 +91,36 @@ export function isConvertApiConfigured(override?: string | null): boolean {
   return Boolean(getConvertApiCredential(override));
 }
 
-class ConvertApiRetryError extends Error {
-  constructor(message: string) {
+class ConvertApiError extends Error {
+  constructor(
+    message: string,
+    readonly retryable = false
+  ) {
     super(message);
-    this.name = "ConvertApiRetryError";
+    this.name = "ConvertApiError";
   }
 }
 
-async function downloadConvertApiFile(
-  file: { FileData?: string; Url?: string }
-): Promise<Buffer | null> {
+async function downloadConvertApiFile(file: {
+  FileData?: string;
+  Url?: string;
+  FileUrl?: string;
+}): Promise<Buffer | null> {
   if (file.FileData) {
     const pdf = Buffer.from(file.FileData, "base64");
-    return pdf.length ? pdf : null;
+    if (pdf.length >= 5 && pdf.subarray(0, 5).toString("utf8") === "%PDF-") {
+      return pdf;
+    }
+    if (pdf.length) return pdf;
   }
-  if (file.Url) {
-    const fileRes = await fetch(file.Url, { signal: AbortSignal.timeout(60_000) });
+  const url = file.Url || file.FileUrl;
+  if (url) {
+    const fileRes = await fetch(url, { signal: AbortSignal.timeout(60_000) });
     if (!fileRes.ok) {
-      throw new ConvertApiRetryError(`ConvertAPI download failed: ${fileRes.status}`);
+      throw new ConvertApiError(
+        `ConvertAPI download failed: ${fileRes.status}`,
+        true
+      );
     }
     const pdf = Buffer.from(await fileRes.arrayBuffer());
     return pdf.length ? pdf : null;
@@ -108,91 +128,168 @@ async function downloadConvertApiFile(
   return null;
 }
 
-async function convertWithConvertApiOnce(
-  docxBuffer: Buffer,
-  secret: string
-): Promise<Buffer | null> {
-  const payload = {
-    Parameters: [
-      {
-        Name: "File",
-        FileValue: {
-          Name: "resume.docx",
-          Data: docxBuffer.toString("base64"),
-        },
-      },
-      { Name: "StoreFile", Value: "false" },
-    ],
-  };
+async function parseConvertApiResponse(res: Response): Promise<Buffer> {
+  const contentType = (res.headers.get("content-type") || "").toLowerCase();
 
-  let res = await fetch("https://v2.convertapi.com/convert/docx/to/pdf", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${secret}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(90_000),
-  });
-
-  if (res.status === 401 || res.status === 403) {
-    res = await fetch(
-      `https://v2.convertapi.com/convert/docx/to/pdf?Secret=${encodeURIComponent(secret)}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(90_000),
-      }
-    );
+  if (
+    contentType.includes("application/pdf") ||
+    contentType.includes("application/octet-stream")
+  ) {
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new ConvertApiError(
+        `ConvertAPI ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`,
+        res.status === 429 || res.status >= 500
+      );
+    }
+    const pdf = Buffer.from(await res.arrayBuffer());
+    if (!pdf.length) {
+      throw new ConvertApiError("ConvertAPI returned empty PDF body", true);
+    }
+    return pdf;
   }
 
-  if (res.status === 429 || res.status >= 500) {
-    const body = await res.text().catch(() => "");
-    throw new ConvertApiRetryError(
-      `ConvertAPI ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`
+  const text = await res.text();
+  let json: {
+    Files?: Array<{ FileData?: string; Url?: string; FileUrl?: string }>;
+    Message?: string;
+    message?: string;
+    Code?: number | string;
+  };
+  try {
+    json = JSON.parse(text) as typeof json;
+  } catch {
+    const asBuf = Buffer.from(text, "binary");
+    if (asBuf.length >= 5 && asBuf.subarray(0, 5).toString("utf8") === "%PDF-") {
+      return asBuf;
+    }
+    throw new ConvertApiError(
+      `ConvertAPI returned non-JSON response (${res.status}): ${text.slice(0, 200)}`,
+      res.status >= 500 || res.status === 429
     );
   }
 
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    console.warn("[pdf] ConvertAPI failed:", res.status, body.slice(0, 300));
-    return null;
+    const msg =
+      json.Message ||
+      json.message ||
+      text.slice(0, 240) ||
+      `HTTP ${res.status}`;
+    throw new ConvertApiError(
+      `ConvertAPI ${res.status}: ${msg}`,
+      res.status === 429 || res.status >= 500
+    );
   }
 
-  const json = (await res.json()) as {
-    Files?: Array<{ FileData?: string; Url?: string }>;
-  };
   const file = json.Files?.[0];
-  if (!file) throw new ConvertApiRetryError("ConvertAPI response missing Files");
-  return downloadConvertApiFile(file);
+  if (!file) {
+    throw new ConvertApiError(
+      `ConvertAPI response missing Files: ${text.slice(0, 240)}`,
+      true
+    );
+  }
+  const pdf = await downloadConvertApiFile(file);
+  if (!pdf?.length) {
+    throw new ConvertApiError(
+      "ConvertAPI Files entry had no FileData/Url",
+      true
+    );
+  }
+  return pdf;
+}
+
+/**
+ * ConvertAPI upload: multipart (matches their curl examples) is most reliable.
+ * Auth: Bearer, then ?auth=, then legacy ?Secret=.
+ */
+async function convertWithConvertApiOnce(
+  docxBuffer: Buffer,
+  secret: string
+): Promise<Buffer> {
+  const attempts: Array<{ label: string; url: string; headers: HeadersInit }> = [
+    {
+      label: "Bearer",
+      url: CONVERT_API_URL,
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        Accept: "application/json",
+      },
+    },
+    {
+      label: "auth query",
+      url: `${CONVERT_API_URL}?auth=${encodeURIComponent(secret)}`,
+      headers: { Accept: "application/json" },
+    },
+    {
+      label: "Secret query",
+      url: `${CONVERT_API_URL}?Secret=${encodeURIComponent(secret)}`,
+      headers: { Accept: "application/json" },
+    },
+  ];
+
+  let lastErr: ConvertApiError | null = null;
+
+  for (const attempt of attempts) {
+    const body = new FormData();
+    body.append(
+      "File",
+      new Blob([new Uint8Array(docxBuffer)], {
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      }),
+      "resume.docx"
+    );
+    body.append("StoreFile", "true");
+
+    const res = await fetch(attempt.url, {
+      method: "POST",
+      headers: attempt.headers,
+      body,
+      signal: AbortSignal.timeout(90_000),
+    });
+
+    try {
+      return await parseConvertApiResponse(res);
+    } catch (err) {
+      const apiErr =
+        err instanceof ConvertApiError
+          ? err
+          : new ConvertApiError(
+              err instanceof Error ? err.message : String(err),
+              true
+            );
+      lastErr = new ConvertApiError(
+        `${apiErr.message} (via ${attempt.label})`,
+        apiErr.retryable
+      );
+      console.warn(`[pdf] ConvertAPI ${attempt.label} failed:`, lastErr.message);
+      // Keep trying alternate auth styles (Bearer / auth= / Secret=).
+    }
+  }
+
+  throw lastErr ?? new ConvertApiError("ConvertAPI authentication failed");
 }
 
 async function convertWithConvertApi(
   docxBuffer: Buffer,
   convertApiSecret?: string | null
-): Promise<Buffer | null> {
+): Promise<{ pdf: Buffer | null; error?: string }> {
   const secret = getConvertApiCredential(convertApiSecret);
-  if (!secret) return null;
+  if (!secret) return { pdf: null, error: "ConvertAPI token not configured" };
 
-  let lastError: unknown = null;
+  let lastError: string | undefined;
   for (let attempt = 1; attempt <= PDF_CONVERT_ATTEMPTS; attempt++) {
     try {
       const pdf = await convertWithConvertApiOnce(docxBuffer, secret);
-      if (pdf?.length) return pdf;
-      lastError = new Error("ConvertAPI returned empty PDF");
+      if (pdf?.length) return { pdf };
+      lastError = "ConvertAPI returned empty PDF";
     } catch (err) {
-      lastError = err;
+      lastError = err instanceof Error ? err.message : String(err);
       const retryable =
-        err instanceof ConvertApiRetryError ||
-        (err instanceof Error &&
-          /timeout|aborted|fetch failed|network|ECONNRESET|ETIMEDOUT/i.test(
-            err.message
-          ));
+        err instanceof ConvertApiError
+          ? err.retryable
+          : /timeout|aborted|fetch failed|network|ECONNRESET|ETIMEDOUT/i.test(
+              lastError
+            );
       if (!retryable || attempt >= PDF_CONVERT_ATTEMPTS) break;
       await sleep(1000 * Math.pow(2, attempt - 1));
       continue;
@@ -202,12 +299,11 @@ async function convertWithConvertApi(
     }
   }
 
-  console.warn(
-    "[pdf] ConvertAPI failed after retries:",
-    lastError instanceof Error ? lastError.message : lastError
-  );
-  return null;
+  console.warn("[pdf] ConvertAPI failed after retries:", lastError);
+  return { pdf: null, error: lastError };
 }
+
+let lastConvertError: string | undefined;
 
 async function convertDocxToPdfOnce(
   docxBuffer: Buffer,
@@ -215,23 +311,28 @@ async function convertDocxToPdfOnce(
 ): Promise<Buffer | null> {
   const convertApiReady = isConvertApiConfigured(convertApiSecret);
 
-  // ConvertAPI first when configured — closest to Word layout on Vercel.
   if (convertApiReady) {
-    const fromConvertApi = await convertWithConvertApi(docxBuffer, convertApiSecret);
-    if (fromConvertApi?.length) return fromConvertApi;
-    // On Vercel, do not silently fall back to a different-looking engine.
+    const { pdf, error } = await convertWithConvertApi(docxBuffer, convertApiSecret);
+    if (pdf?.length) {
+      lastConvertError = undefined;
+      return pdf;
+    }
+    lastConvertError = error;
+    // On Vercel with ConvertAPI configured, do not silently use a different layout engine.
     if (isServerless()) {
       console.warn("[pdf] ConvertAPI failed on Vercel; skipping preview fallback.");
       return null;
     }
+  } else {
+    lastConvertError = isServerless()
+      ? "ConvertAPI token missing (required on Vercel)"
+      : undefined;
   }
 
   if (isServerless()) {
-    // No ConvertAPI token: best-effort open-source preview (layout may differ).
     return convertWithDocxToPdfLite(docxBuffer, "preview");
   }
 
-  // Local: Word first (identical), then LibreOffice, then preview.
   const fromAuto = await convertWithDocxToPdfLite(docxBuffer, "auto");
   if (fromAuto?.length) return fromAuto;
 
@@ -242,21 +343,30 @@ export type ConvertDocxToPdfOptions = {
   convertApiSecret?: string | null;
 };
 
-/** Convert DOCX bytes → PDF bytes. Never uses OpenRouter. */
-export async function convertDocxToPdf(
+export type ConvertDocxToPdfResult = {
+  pdf: Buffer | null;
+  error?: string;
+};
+
+/** Convert DOCX bytes → PDF bytes, with error detail for the UI. */
+export async function convertDocxToPdfDetailed(
   docxBuffer: Buffer,
   options?: ConvertDocxToPdfOptions
-): Promise<Buffer | null> {
-  if (!docxBuffer?.length) return null;
+): Promise<ConvertDocxToPdfResult> {
+  if (!docxBuffer?.length) {
+    return { pdf: null, error: "Empty DOCX" };
+  }
 
+  lastConvertError = undefined;
   for (let attempt = 1; attempt <= PDF_CONVERT_ATTEMPTS; attempt++) {
     try {
       const pdf = await convertDocxToPdfOnce(docxBuffer, options?.convertApiSecret);
-      if (pdf?.length) return pdf;
+      if (pdf?.length) return { pdf };
     } catch (err) {
+      lastConvertError = err instanceof Error ? err.message : String(err);
       console.warn(
         `[pdf] DOCX→PDF attempt ${attempt}/${PDF_CONVERT_ATTEMPTS} error:`,
-        err instanceof Error ? err.message : err
+        lastConvertError
       );
     }
     if (attempt < PDF_CONVERT_ATTEMPTS) {
@@ -264,8 +374,21 @@ export async function convertDocxToPdf(
     }
   }
 
-  console.warn("[pdf] Could not convert DOCX→PDF after retries.");
-  return null;
+  return {
+    pdf: null,
+    error:
+      lastConvertError ||
+      "Could not convert DOCX→PDF after retries. Check ConvertAPI token.",
+  };
+}
+
+/** Convert DOCX bytes → PDF bytes. Never uses OpenRouter. */
+export async function convertDocxToPdf(
+  docxBuffer: Buffer,
+  options?: ConvertDocxToPdfOptions
+): Promise<Buffer | null> {
+  const { pdf } = await convertDocxToPdfDetailed(docxBuffer, options);
+  return pdf;
 }
 
 export async function convertResumeToPdfBuffer(input: {
