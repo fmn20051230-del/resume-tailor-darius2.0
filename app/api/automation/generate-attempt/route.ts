@@ -28,6 +28,7 @@ type Body = {
   outputDir?: string;
   resumeNamePrefix?: string;
   apiKey?: string;
+  convertApiSecret?: string;
   previousError?: string;
 };
 
@@ -142,6 +143,10 @@ export async function POST(request: NextRequest) {
             apiKey:
               typeof body.apiKey === "string" && body.apiKey.trim()
                 ? body.apiKey.trim()
+                : undefined,
+            convertApiSecret:
+              typeof body.convertApiSecret === "string" && body.convertApiSecret.trim()
+                ? body.convertApiSecret.trim()
                 : undefined,
             previousError:
               typeof body.previousError === "string" ? body.previousError : undefined,

@@ -571,6 +571,9 @@ export default function AutomationDashboard() {
    */
   async function ensurePdfsForBatchFiles(): Promise<void> {
     const jobs = batchFilesRef.current;
+    const convertApiSecret = settings?.convertApiSecret?.trim() || undefined;
+    let backfillFailures = 0;
+
     for (const job of jobs) {
       const docx = job.files.find((f) => /\.docx$/i.test(f.fileName));
       const hasPdf = job.files.some((f) => /\.pdf$/i.test(f.fileName));
@@ -583,6 +586,7 @@ export default function AutomationDashboard() {
           body: JSON.stringify({
             docxBase64: docx.base64,
             fileName: docx.fileName,
+            convertApiSecret,
           }),
         });
         if (!res.ok) {
@@ -591,28 +595,44 @@ export default function AutomationDashboard() {
             `[pdf] Backfill failed for ${job.folderName}:`,
             data.error ?? res.status
           );
+          backfillFailures++;
           continue;
         }
         const data = (await res.json()) as {
           pdfBase64?: string;
           pdfFileName?: string;
         };
-        if (!data.pdfBase64) continue;
+        if (!data.pdfBase64) {
+          backfillFailures++;
+          continue;
+        }
         job.files.push({
           fileName:
             data.pdfFileName || docx.fileName.replace(/\.docx$/i, ".pdf"),
           base64: data.pdfBase64,
         });
-        // Reflect PDF presence in the jobs table when folder name matches.
         setJobs((prev) =>
           prev.map((row) =>
             row.folderName === job.folderName ? { ...row, hasPdf: true } : row
           )
         );
       } catch (err) {
+        backfillFailures++;
         console.warn(
           `[pdf] Backfill error for ${job.folderName}:`,
           err instanceof Error ? err.message : err
+        );
+      }
+    }
+
+    if (backfillFailures > 0) {
+      const onProd =
+        typeof window !== "undefined" &&
+        window.location.hostname !== "localhost" &&
+        window.location.hostname !== "127.0.0.1";
+      if (onProd || !settings?.convertApiSecret?.trim()) {
+        setError(
+          `${backfillFailures} PDF(s) missing. Add ConvertAPI Secret in Settings (convertapi.com) so the deployed app can convert DOCX→PDF with the same layout as Word.`
         );
       }
     }
@@ -814,6 +834,8 @@ export default function AutomationDashboard() {
           outputDir: regen.outputDir,
           resumeNamePrefix: regen.resumeNamePrefix,
           apiKey: regen.apiKey,
+          convertApiSecret:
+            settings.convertApiSecret.trim() || regen.convertApiSecret || undefined,
           previousError: "error" in regen ? regen.error : undefined,
         }),
         signal: controller.signal,
@@ -850,6 +872,7 @@ export default function AutomationDashboard() {
           outputDir: settings.outputDir,
           resumeNamePrefix: resumeNamePrefix.trim(),
           apiKey: settings.apiKey.trim() || undefined,
+          convertApiSecret: settings.convertApiSecret.trim() || undefined,
         }),
         signal: controller.signal,
       });
@@ -1037,11 +1060,14 @@ export default function AutomationDashboard() {
 
       {isProductionHost && (
         <div className="art-banner art-banner--warn" role="status">
-          <strong>Same parallel engine as localhost.</strong> Jobs run concurrently via
-          separate API calls (your Parallel jobs setting). Playwright still needs a local
-          machine (Vercel uses HTTP scrape fallback). PDF is always DOCX→PDF (same layout)
-          via Word/LibreOffice/<code>CONVERTAPI_SECRET</code> — missing PDFs are backfilled
-          from the DOCX before ZIP download (not OpenRouter).
+          <strong>Vercel PDF setup:</strong> Localhost uses Microsoft Word for DOCX→PDF.
+          On Vercel, set <strong>ConvertAPI Secret</strong> in{" "}
+          <a href="/automation?tab=settings">Settings</a> (free at{" "}
+          <a href="https://www.convertapi.com" target="_blank" rel="noreferrer">
+            convertapi.com
+          </a>
+          ) so every resume gets a PDF matching the DOCX layout. OpenRouter is not used for
+          PDF.
         </div>
       )}
 
@@ -1454,7 +1480,7 @@ export default function AutomationDashboard() {
                   <li>
                     {activeJob.hasPdf ? "📄" : "⚠"} {resumeFileBase}.pdf
                     {!activeJob.hasPdf &&
-                      " (set CONVERTAPI_SECRET on Vercel for DOCX→PDF)"}
+                      " (add ConvertAPI Secret in Settings for Vercel PDFs)"}
                   </li>
                   <li>🔗 job_url.txt</li>
                   <li>📝 raw_jd.txt</li>

@@ -91,6 +91,30 @@ export function SettingsPanel() {
               />
             </div>
             <div className="art-form-row">
+              <label className="art-label" htmlFor="convert-api">
+                ConvertAPI Secret
+                {settings.convertApiSecret.trim().length > 4 && (
+                  <span className="art-connected">Connected</span>
+                )}
+              </label>
+              <input
+                id="convert-api"
+                type="password"
+                className="art-input"
+                value={settings.convertApiSecret}
+                onChange={(e) => update({ convertApiSecret: e.target.value })}
+                placeholder="Required on Vercel for DOCX→PDF (same layout as Word)"
+                autoComplete="off"
+              />
+              <p className="art-hint">
+                Free at{" "}
+                <a href="https://www.convertapi.com" target="_blank" rel="noreferrer">
+                  convertapi.com
+                </a>
+                . Localhost can use Word instead; Vercel needs this for matching PDFs.
+              </p>
+            </div>
+            <div className="art-form-row">
               <label className="art-label" htmlFor="output-dir">Output folder</label>
               <input
                 id="output-dir"

@@ -136,7 +136,9 @@ export async function runAutomationPipeline(
         const hasPdf = entry.files.some((f) => /\.pdf$/i.test(f.name));
         if (!docx?.data?.length || hasPdf) continue;
         try {
-          const pdf = await convertDocxToPdf(docx.data);
+          const pdf = await convertDocxToPdf(docx.data, {
+            convertApiSecret: config.convertApiSecret,
+          });
           if (pdf?.length) {
             entry.files.push({
               name: docx.name.replace(/\.docx$/i, ".pdf"),

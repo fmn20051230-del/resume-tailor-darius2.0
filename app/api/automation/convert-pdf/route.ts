@@ -2,14 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { convertDocxToPdf } from "@/lib/automation/docx-to-pdf";
 
 export const maxDuration = 120;
+export const dynamic = "force-dynamic";
 
 /**
  * Convert an existing DOCX (base64) → PDF (base64).
  * Used to backfill missing PDFs so every resume in the ZIP has both files.
- * Does not call OpenRouter.
+ * Does not call OpenRouter — only ConvertAPI / Word / LibreOffice.
  */
 export async function POST(request: NextRequest) {
-  let body: { docxBase64?: string; fileName?: string };
+  let body: {
+    docxBase64?: string;
+    fileName?: string;
+    convertApiSecret?: string;
+  };
   try {
     body = await request.json();
   } catch {
@@ -33,13 +38,18 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Empty DOCX" }, { status: 400 });
   }
 
+  const convertApiSecret =
+    typeof body.convertApiSecret === "string" && body.convertApiSecret.trim()
+      ? body.convertApiSecret.trim()
+      : undefined;
+
   try {
-    const pdfBuffer = await convertDocxToPdf(docxBuffer);
+    const pdfBuffer = await convertDocxToPdf(docxBuffer, { convertApiSecret });
     if (!pdfBuffer?.length) {
       return NextResponse.json(
         {
           error:
-            "DOCX→PDF conversion failed. On Vercel set CONVERTAPI_SECRET; locally install Word or LibreOffice.",
+            "DOCX→PDF failed. On Vercel: add ConvertAPI Secret in Automation Settings (or CONVERTAPI_SECRET env). Free at convertapi.com. Locally: install Word or LibreOffice.",
         },
         { status: 502 }
       );

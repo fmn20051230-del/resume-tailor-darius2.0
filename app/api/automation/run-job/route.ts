@@ -26,6 +26,7 @@ type RunJobBody = {
   outputDir?: string;
   resumeNamePrefix?: string;
   apiKey?: string;
+  convertApiSecret?: string;
 };
 
 export async function POST(request: NextRequest) {
@@ -128,6 +129,10 @@ export async function POST(request: NextRequest) {
             apiKey:
               typeof body.apiKey === "string" && body.apiKey.trim()
                 ? body.apiKey.trim()
+                : undefined,
+            convertApiSecret:
+              typeof body.convertApiSecret === "string" && body.convertApiSecret.trim()
+                ? body.convertApiSecret.trim()
                 : undefined,
             attemptTimeoutMs,
             maxAttempts,

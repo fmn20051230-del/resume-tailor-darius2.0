@@ -86,6 +86,7 @@ export type SingleJobConfig = Pick<
   | "outputDir"
   | "resumeNamePrefix"
   | "apiKey"
+  | "convertApiSecret"
 > & {
   url: string;
   index: number;
@@ -116,6 +117,7 @@ export type ResumeGenerateContinuationConfig = {
   outputDir: string;
   resumeNamePrefix: string;
   apiKey?: string;
+  convertApiSecret?: string;
   previousError?: string;
 };
 
@@ -136,6 +138,7 @@ async function saveAndComplete(args: {
   extractedJd: string;
   resumeMarkdown: string;
   docxBuffer: Buffer;
+  convertApiSecret?: string;
   jobElapsed: () => number;
 }): Promise<"completed"> {
   const pdfStarted = Date.now();
@@ -145,7 +148,10 @@ async function saveAndComplete(args: {
   for (let attempt = 1; attempt <= 3 && !pdfBuffer?.length; attempt++) {
     pdfBuffer = await pdfLock(() =>
       withTimeout(STEP_TIMEOUT_MS, "PDF conversion", () =>
-        convertResumeToPdfBuffer({ docxBuffer: args.docxBuffer })
+        convertResumeToPdfBuffer({
+          docxBuffer: args.docxBuffer,
+          convertApiSecret: args.convertApiSecret,
+        })
       )
     ).catch((err) => {
       console.error(
@@ -285,6 +291,7 @@ export async function runResumeGenerateContinuation(
     outputDir: config.outputDir,
     resumeNamePrefix: config.resumeNamePrefix,
     apiKey: config.apiKey,
+    convertApiSecret: config.convertApiSecret,
   });
 
   try {
@@ -336,6 +343,7 @@ export async function runResumeGenerateContinuation(
       extractedJd: config.extractedJd,
       resumeMarkdown: tailored.content,
       docxBuffer: tailored.docxBuffer,
+      convertApiSecret: config.convertApiSecret,
       jobElapsed,
     });
   } catch (err) {
@@ -367,6 +375,7 @@ export async function runResumeGenerateContinuation(
         outputDir: config.outputDir,
         resumeNamePrefix: config.resumeNamePrefix,
         apiKey: config.apiKey,
+        convertApiSecret: config.convertApiSecret,
       });
       emitStep(
         "resume_generating",
@@ -563,6 +572,7 @@ export async function runSingleAutomationJob(
       outputDir: config.outputDir,
       resumeNamePrefix: config.resumeNamePrefix,
       apiKey: config.apiKey,
+      convertApiSecret: config.convertApiSecret,
     });
 
     let docxBuffer: Buffer;
@@ -641,6 +651,7 @@ export async function runSingleAutomationJob(
           outputDir: config.outputDir,
           resumeNamePrefix: config.resumeNamePrefix,
           apiKey: config.apiKey,
+          convertApiSecret: config.convertApiSecret,
         });
         emitStep(
           "resume_generating",
@@ -669,6 +680,7 @@ export async function runSingleAutomationJob(
       extractedJd: extracted.raw,
       resumeMarkdown,
       docxBuffer,
+      convertApiSecret: config.convertApiSecret,
       jobElapsed,
     });
   } catch (err) {

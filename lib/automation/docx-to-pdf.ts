@@ -102,7 +102,9 @@ async function convertWithLibreOffice(docxBuffer: Buffer): Promise<Buffer | null
   }
 }
 
-function getConvertApiCredential(): string | null {
+function getConvertApiCredential(override?: string | null): string | null {
+  const fromOverride = override?.trim();
+  if (fromOverride) return fromOverride;
   return (
     process.env.CONVERTAPI_SECRET?.trim() ||
     process.env.CONVERTAPI_TOKEN?.trim() ||
@@ -139,10 +141,10 @@ async function downloadConvertApiFile(
  * ConvertAPI converts the real DOCX bytes → PDF (same layout). No OpenRouter.
  * Set CONVERTAPI_SECRET or CONVERTAPI_TOKEN in Vercel env vars.
  */
-async function convertWithConvertApiOnce(docxBuffer: Buffer): Promise<Buffer | null> {
-  const secret = getConvertApiCredential();
-  if (!secret) return null;
-
+async function convertWithConvertApiOnce(
+  docxBuffer: Buffer,
+  secret: string
+): Promise<Buffer | null> {
   const payload = {
     Parameters: [
       {
@@ -205,8 +207,11 @@ async function convertWithConvertApiOnce(docxBuffer: Buffer): Promise<Buffer | n
   return downloadConvertApiFile(file);
 }
 
-async function convertWithConvertApi(docxBuffer: Buffer): Promise<Buffer | null> {
-  const secret = getConvertApiCredential();
+async function convertWithConvertApi(
+  docxBuffer: Buffer,
+  convertApiSecret?: string | null
+): Promise<Buffer | null> {
+  const secret = getConvertApiCredential(convertApiSecret);
   if (!secret) {
     if (isServerless()) {
       console.warn(
@@ -219,7 +224,7 @@ async function convertWithConvertApi(docxBuffer: Buffer): Promise<Buffer | null>
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= PDF_CONVERT_ATTEMPTS; attempt++) {
     try {
-      const pdf = await convertWithConvertApiOnce(docxBuffer);
+      const pdf = await convertWithConvertApiOnce(docxBuffer, secret);
       if (pdf?.length) return pdf;
       lastError = new Error("ConvertAPI returned empty PDF");
     } catch (err) {
@@ -251,9 +256,12 @@ async function convertWithConvertApi(docxBuffer: Buffer): Promise<Buffer | null>
   return null;
 }
 
-async function convertDocxToPdfOnce(docxBuffer: Buffer): Promise<Buffer | null> {
+async function convertDocxToPdfOnce(
+  docxBuffer: Buffer,
+  convertApiSecret?: string | null
+): Promise<Buffer | null> {
   if (isServerless()) {
-    return convertWithConvertApi(docxBuffer);
+    return convertWithConvertApi(docxBuffer, convertApiSecret);
   }
 
   const fromWord = await convertWithWord(docxBuffer);
@@ -262,19 +270,27 @@ async function convertDocxToPdfOnce(docxBuffer: Buffer): Promise<Buffer | null> 
   const fromLibre = await convertWithLibreOffice(docxBuffer);
   if (fromLibre?.length) return fromLibre;
 
-  return convertWithConvertApi(docxBuffer);
+  return convertWithConvertApi(docxBuffer, convertApiSecret);
 }
+
+export type ConvertDocxToPdfOptions = {
+  /** Overrides env CONVERTAPI_SECRET / CONVERTAPI_TOKEN (e.g. from Settings UI). */
+  convertApiSecret?: string | null;
+};
 
 /**
  * Convert DOCX bytes to PDF bytes (layout-faithful). Never regenerates via LLM.
  * Retries the full converter chain so intermittent failures do not drop PDFs.
  */
-export async function convertDocxToPdf(docxBuffer: Buffer): Promise<Buffer | null> {
+export async function convertDocxToPdf(
+  docxBuffer: Buffer,
+  options?: ConvertDocxToPdfOptions
+): Promise<Buffer | null> {
   if (!docxBuffer?.length) return null;
 
   for (let attempt = 1; attempt <= PDF_CONVERT_ATTEMPTS; attempt++) {
     try {
-      const pdf = await convertDocxToPdfOnce(docxBuffer);
+      const pdf = await convertDocxToPdfOnce(docxBuffer, options?.convertApiSecret);
       if (pdf?.length) return pdf;
     } catch (err) {
       console.warn(
@@ -288,7 +304,7 @@ export async function convertDocxToPdf(docxBuffer: Buffer): Promise<Buffer | nul
   }
 
   console.warn(
-    "[pdf] Could not convert DOCX→PDF after retries. Locally: Word/LibreOffice. On Vercel: CONVERTAPI_SECRET."
+    "[pdf] Could not convert DOCX→PDF after retries. Locally: Word/LibreOffice. On Vercel: set ConvertAPI secret in Settings or CONVERTAPI_SECRET env."
   );
   return null;
 }
@@ -297,8 +313,11 @@ export async function convertDocxToPdf(docxBuffer: Buffer): Promise<Buffer | nul
 export async function convertResumeToPdfBuffer(input: {
   docxBuffer: Buffer;
   resumeMarkdown?: string;
+  convertApiSecret?: string | null;
 }): Promise<Buffer | null> {
-  return convertDocxToPdf(input.docxBuffer);
+  return convertDocxToPdf(input.docxBuffer, {
+    convertApiSecret: input.convertApiSecret,
+  });
 }
 
 /** @deprecated Use convertDocxToPdf */
@@ -306,12 +325,15 @@ export async function convertResumeToPdf(input: {
   docxBuffer: Buffer;
   resumeMarkdown?: string;
   baseResume?: string;
+  convertApiSecret?: string | null;
 }): Promise<Buffer | null> {
-  return convertDocxToPdf(input.docxBuffer);
+  return convertDocxToPdf(input.docxBuffer, {
+    convertApiSecret: input.convertApiSecret,
+  });
 }
 
-export function isPdfConversionConfigured(): boolean {
+export function isPdfConversionConfigured(convertApiSecret?: string | null): boolean {
   if (process.platform === "win32") return true;
-  if (!isServerless()) return true; // LibreOffice may still be installed
-  return Boolean(getConvertApiCredential());
+  if (!isServerless()) return true;
+  return Boolean(getConvertApiCredential(convertApiSecret));
 }

@@ -60,6 +60,7 @@ export type JobGenerateContextFields = {
   outputDir: string;
   resumeNamePrefix: string;
   apiKey?: string;
+  convertApiSecret?: string;
   error?: string;
 };
 
@@ -143,6 +144,8 @@ export type AutomationRunConfig = {
   /** Prefix for resume files, e.g. "darius" → darius_resume.docx */
   resumeNamePrefix: string;
   apiKey?: string;
+  /** ConvertAPI secret for DOCX→PDF on Vercel (overrides env). */
+  convertApiSecret?: string;
   /** How many jobs to process at once (same OpenRouter key). Default 4. */
   concurrency?: number;
 };
