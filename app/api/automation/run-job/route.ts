@@ -10,8 +10,8 @@ import { runSingleAutomationJob } from "@/lib/automation/run-single-job";
 import { RESUME_ATTEMPT_TIMEOUT_MS, MAX_RESUME_GENERATE_ATTEMPTS } from "@/lib/tailor-resume";
 
 export const dynamic = "force-dynamic";
-/** One job per invocation — 6 min generate attempts need headroom beyond Hobby 300s. */
-export const maxDuration = 800;
+/** Vercel Hobby allows 1–300s only. Pro can raise this later. */
+export const maxDuration = 300;
 
 type RunJobBody = {
   url?: string;
@@ -77,10 +77,10 @@ export async function POST(request: NextRequest) {
   ];
 
   const onVercel = Boolean(process.env.VERCEL);
-  // Deployed: 6 min per generate attempt (same spirit as localhost 7 min).
-  // Local: 7 min × 3 attempts.
-  const attemptTimeoutMs = onVercel ? 6 * 60 * 1000 : RESUME_ATTEMPT_TIMEOUT_MS;
-  const maxAttempts = onVercel ? 2 : MAX_RESUME_GENERATE_ATTEMPTS;
+  // Hobby maxDuration is 300s for the whole job (scrape + extract + generate).
+  // True 6 min/attempt needs Vercel Pro; on Hobby use the full remaining window (~4.5 min × 1).
+  const attemptTimeoutMs = onVercel ? 270_000 : RESUME_ATTEMPT_TIMEOUT_MS;
+  const maxAttempts = onVercel ? 1 : MAX_RESUME_GENERATE_ATTEMPTS;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
