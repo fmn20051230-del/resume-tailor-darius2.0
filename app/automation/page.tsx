@@ -355,6 +355,15 @@ export default function AutomationDashboard() {
         setFailed((f) => f + 1);
         return;
       }
+      if (event.type === "job_need_regenerate") {
+        updateJob(event.index, {
+          status: "processing",
+          statusLabel: `Resume regenerating (${event.nextAttempt}/${event.maxAttempts})…`,
+          error: event.error,
+          elapsedMs: event.elapsedMs,
+        });
+        return;
+      }
       if (event.type === "job_skipped") {
         updateJob(event.index, {
           status: "skipped",
@@ -586,6 +595,12 @@ export default function AutomationDashboard() {
       if (!reader) throw new Error("No response stream");
       const decoder = new TextDecoder();
       let buffer = "";
+      let pendingRegen: Extract<
+        AutomationProgressEvent,
+        { type: "job_need_regenerate" }
+      > | null = null;
+      let completedOrFailed = false;
+
       while (true) {
         const { done, value } = await reader.read();
         if (done || stopRef.current) break;
@@ -607,12 +622,71 @@ export default function AutomationDashboard() {
             setNowTick(event.at || Date.now());
             continue;
           }
+          if (event.type === "job_need_regenerate") {
+            pendingRegen = event;
+            handleEvent(event);
+            continue;
+          }
           if (event.type === "job_complete") {
+            pendingRegen = null;
+            completedOrFailed = true;
             folderPaths.push(event.folderPath);
+            handleEvent(event);
+            continue;
+          }
+          if (event.type === "job_failed" || event.type === "job_skipped") {
+            pendingRegen = null;
+            completedOrFailed = true;
+            handleEvent(event);
+            continue;
           }
           handleEvent(event);
         }
       }
+
+      return { pendingRegen, completedOrFailed };
+    };
+
+    const runGenerateAttempt = async (
+      regen: Extract<AutomationProgressEvent, { type: "job_need_regenerate" }>
+    ) => {
+      const res = await fetch("/api/automation/generate-attempt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: regen.url,
+          index: regen.index,
+          total: urls.length,
+          nextAttempt: regen.nextAttempt,
+          maxAttempts: regen.maxAttempts,
+          tailoringPrompt: regen.tailoringPrompt,
+          baseResume: regen.baseResume,
+          slotIndex: regen.slotIndex,
+          tailorJd: regen.tailorJd,
+          rawJd: regen.rawJd,
+          extractedJd: regen.extractedJd,
+          companyName: regen.companyName,
+          positionName: regen.positionName,
+          resumeType: regen.resumeType,
+          folderName: regen.folderName,
+          outputDir: regen.outputDir,
+          resumeNamePrefix: regen.resumeNamePrefix,
+          apiKey: regen.apiKey,
+          previousError: regen.error,
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        handleEvent({
+          type: "job_failed",
+          index: regen.index,
+          url: regen.url,
+          error: data.error ?? `Regenerate failed (${res.status})`,
+        });
+        return null;
+      }
+      return readJobStream(res);
     };
 
     const runOneJob = async (url: string, index: number) => {
@@ -644,7 +718,22 @@ export default function AutomationDashboard() {
         });
         return;
       }
-      await readJobStream(res);
+
+      let result = await readJobStream(res);
+      // Deployed: each generate attempt is a separate API call (4.5 min × up to 3).
+      while (result?.pendingRegen && !stopRef.current) {
+        const regen = result.pendingRegen;
+        handleEvent({
+          type: "step",
+          index: regen.index,
+          step: "resume_generating",
+          message: `Starting resume attempt ${regen.nextAttempt}/${regen.maxAttempts} (4m 30s limit)…`,
+        });
+        result = (await runGenerateAttempt(regen)) ?? {
+          pendingRegen: null,
+          completedOrFailed: true,
+        };
+      }
     };
 
     try {

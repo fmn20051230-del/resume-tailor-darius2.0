@@ -86,6 +86,30 @@ export type AutomationProgressEvent =
     }
   | { type: "job_failed"; index: number; url: string; error: string; elapsedMs?: number }
   | { type: "job_skipped"; index: number; url: string; error: string; elapsedMs?: number }
+  | {
+      /** Deployed: each generate attempt is its own serverless call (4.5 min × up to 3). */
+      type: "job_need_regenerate";
+      index: number;
+      url: string;
+      error: string;
+      /** Next attempt number to run (2 or 3). */
+      nextAttempt: number;
+      maxAttempts: number;
+      elapsedMs?: number;
+      tailoringPrompt: string;
+      baseResume: string;
+      slotIndex: number;
+      tailorJd: string;
+      rawJd: string;
+      extractedJd: string;
+      companyName: string;
+      positionName: string;
+      resumeType: 1 | 2 | 3 | 4;
+      folderName: string;
+      outputDir: string;
+      resumeNamePrefix: string;
+      apiKey?: string;
+    }
   | { type: "heartbeat"; at: number }
   | {
       type: "batch_complete";

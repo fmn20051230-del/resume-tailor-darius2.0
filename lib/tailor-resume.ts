@@ -29,8 +29,13 @@ export type TailorResumeInput = {
   apiKey?: string;
   /** Override per-attempt timeout (default 7 minutes). */
   attemptTimeoutMs?: number;
-  /** Override max attempts (default 3). */
+  /** Override max attempts (default 3). Includes regenerations for missing Summary, etc. */
   maxAttempts?: number;
+  /**
+   * Hard wall-clock budget across all attempts. When set (e.g. on Vercel Hobby),
+   * remaining time is shared so missing-Summary regenerations can still run.
+   */
+  totalBudgetMs?: number;
   /** Called before each generate attempt (1-based). */
   onAttempt?: (attempt: number, maxAttempts: number, previousError?: string) => void;
 };
@@ -74,9 +79,14 @@ export class ResumeAttemptTimeoutError extends Error {
 function isRegenerableResumeError(err: unknown): boolean {
   if (err instanceof ResumeAttemptTimeoutError) return true;
   const msg = err instanceof Error ? err.message : String(err);
-  return /missing a Summary section|missing work experience|missing job titles|Please regenerate|timed out|timeout/i.test(
+  return /missing a Summary section|missing work experience|missing job titles|Please regenerate|timed out|timeout|exceeded .+ and was terminated/i.test(
     msg
   );
+}
+
+/** True when the model/output should be retried (missing Summary, timeout, etc.). */
+export function isRegenerableTailorError(err: unknown): boolean {
+  return isRegenerableResumeError(err);
 }
 
 function buildRetryNudge(previousError: string): string {
@@ -144,11 +154,14 @@ export async function tailorResume(input: TailorResumeInput): Promise<TailorResu
     30_000,
     input.attemptTimeoutMs ?? RESUME_ATTEMPT_TIMEOUT_MS
   );
-  const totalBudgetMs = perAttemptMs * maxAttempts;
+  const totalBudgetMs = Math.max(
+    30_000,
+    input.totalBudgetMs ?? perAttemptMs * maxAttempts
+  );
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const budgetLeft = totalBudgetMs - (Date.now() - budgetStarted);
-    if (budgetLeft <= 0) {
+    if (budgetLeft <= 5_000) {
       throw lastError ?? new Error("Resume generation exceeded total time budget");
     }
 
@@ -179,6 +192,7 @@ export async function tailorResume(input: TailorResumeInput): Promise<TailorResu
       return result;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
+      // Missing Summary / experience / titles → regenerate automatically (up to maxAttempts).
       if (!isRegenerableResumeError(err) || attempt >= maxAttempts) {
         throw lastError;
       }

@@ -1,4 +1,4 @@
-import type { AutomationProgressEvent, AutomationRunConfig, PipelineStepId } from "./types";
+import type { AutomationProgressEvent, AutomationRunConfig, PipelineStepId, ResumeSlotIndex } from "./types";
 import { scrapeJobPage } from "./scraper";
 import { extractJobData, EXTRACTION_ATTEMPT_TIMEOUT_MS } from "./extractor";
 import { buildTailorJobDescription } from "./parse-extraction";
@@ -8,6 +8,7 @@ import { convertDocxToPdf } from "./docx-to-pdf";
 import {
   MAX_RESUME_GENERATE_ATTEMPTS,
   RESUME_ATTEMPT_TIMEOUT_MS,
+  isRegenerableTailorError,
   tailorResume,
 } from "@/lib/tailor-resume";
 import {
@@ -18,6 +19,9 @@ import {
 export type ProgressEmitter = (event: AutomationProgressEvent) => void;
 
 export const STEP_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Per generate attempt on Vercel Hobby (fits under maxDuration 300). */
+export const DEPLOYED_RESUME_ATTEMPT_TIMEOUT_MS = 4.5 * 60 * 1000;
 
 function formatDuration(ms: number): string {
   const totalSec = Math.max(0, Math.round(ms / 1000));
@@ -86,16 +90,254 @@ export type SingleJobConfig = Pick<
   url: string;
   index: number;
   total: number;
-  /** Optional overrides (e.g. shorter on constrained hosts). */
   attemptTimeoutMs?: number;
   maxAttempts?: number;
+  /** 1-based generate attempt for this invocation (deployed retries use 2, 3). */
+  generateAttempt?: number;
 };
 
-export type SingleJobOutcome = "completed" | "failed" | "skipped";
+export type ResumeGenerateContinuationConfig = {
+  url: string;
+  index: number;
+  total: number;
+  generateAttempt: number;
+  maxAttempts: number;
+  attemptTimeoutMs: number;
+  tailoringPrompt: string;
+  baseResume: string;
+  slotIndex: ResumeSlotIndex;
+  tailorJd: string;
+  rawJd: string;
+  extractedJd: string;
+  companyName: string;
+  positionName: string;
+  resumeType: 1 | 2 | 3 | 4;
+  folderName: string;
+  outputDir: string;
+  resumeNamePrefix: string;
+  apiKey?: string;
+  previousError?: string;
+};
+
+export type SingleJobOutcome = "completed" | "failed" | "skipped" | "needs_regenerate";
+
+async function saveAndComplete(args: {
+  emit: ProgressEmitter;
+  emitStep: (step: PipelineStepId, message: string, stepElapsedMs?: number) => void;
+  index: number;
+  url: string;
+  folderName: string;
+  companyName: string;
+  positionName: string;
+  slotName: string;
+  outputDir: string;
+  resumeNamePrefix: string;
+  rawJd: string;
+  extractedJd: string;
+  resumeMarkdown: string;
+  docxBuffer: Buffer;
+  jobElapsed: () => number;
+}): Promise<"completed"> {
+  const pdfStarted = Date.now();
+  const pdfBuffer = await pdfLock(() =>
+    withTimeout(STEP_TIMEOUT_MS, "PDF conversion", () => convertDocxToPdf(args.docxBuffer))
+  ).catch((err) => {
+    console.error(
+      `[pdf] DOCX→PDF failed for job ${args.index} (${args.folderName}):`,
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  });
+
+  const saved = await saveJobArtifacts({
+    outputDir: args.outputDir,
+    folderName: args.folderName,
+    resumeNamePrefix: args.resumeNamePrefix,
+    jobUrl: args.url,
+    rawJd: args.rawJd,
+    extractedJd: args.extractedJd,
+    resumeMarkdown: args.resumeMarkdown,
+    docxBuffer: args.docxBuffer,
+    pdfBuffer,
+  });
+
+  const hasPdf = !!saved.pdfPath;
+  args.emitStep(
+    "folder_created",
+    hasPdf
+      ? "Folder created (DOCX + PDF)"
+      : "Folder created (DOCX only — install Word or LibreOffice for PDF)",
+    Date.now() - pdfStarted
+  );
+
+  args.emit({
+    type: "job_complete",
+    index: args.index,
+    folderPath: saved.folderPath,
+    folderName: args.folderName,
+    companyName: args.companyName,
+    positionName: args.positionName,
+    slotLabel: args.slotName,
+    hasPdf,
+    elapsedMs: args.jobElapsed(),
+    artifacts: {
+      jobUrl: args.url,
+      rawJd: args.rawJd,
+      extractedJd: args.extractedJd,
+      resumeMarkdown: args.resumeMarkdown,
+      docxBase64: args.docxBuffer.toString("base64"),
+      resumeFileName: `${saved.resumeBaseName}.docx`,
+      pdfBase64: pdfBuffer?.length ? pdfBuffer.toString("base64") : undefined,
+    },
+  });
+  args.emitStep("moving_next", "Moving to next job...");
+  return "completed";
+}
+
+/**
+ * One generate attempt (used for deployed retries 2/3 and 3/3 — each gets its own
+ * serverless maxDuration / 4.5 min window).
+ */
+export async function runResumeGenerateContinuation(
+  config: ResumeGenerateContinuationConfig,
+  emit: ProgressEmitter
+): Promise<SingleJobOutcome> {
+  const {
+    url,
+    index,
+    total,
+    generateAttempt,
+    maxAttempts,
+    attemptTimeoutMs,
+    slotIndex,
+    folderName,
+  } = config;
+  const jobStartedAt = Date.now();
+  const jobElapsed = () => Date.now() - jobStartedAt;
+  const slotName = slotLabel(slotIndex);
+
+  const emitStep = (
+    step: PipelineStepId,
+    message: string,
+    stepElapsedMs?: number
+  ) => {
+    emit({
+      type: "step",
+      index,
+      step,
+      message:
+        stepElapsedMs != null
+          ? `${message} (${formatDuration(stepElapsedMs)})`
+          : message,
+      elapsedMs: jobElapsed(),
+      stepElapsedMs,
+    });
+  };
+
+  emit({
+    type: "job_start",
+    index,
+    total,
+    url,
+    startedAt: jobStartedAt,
+  });
+  emit({
+    type: "job_meta",
+    index,
+    companyName: config.companyName,
+    positionName: config.positionName,
+    resumeType: config.resumeType,
+    slotLabel: slotName,
+    folderName,
+  });
+  emitStep(
+    "resume_generating",
+    `Resume generating attempt ${generateAttempt}/${maxAttempts} (${formatDuration(attemptTimeoutMs)} limit)`
+  );
+
+  try {
+    const tailorStarted = Date.now();
+    const tailored = await tailorResume({
+      slotIndex,
+      baseResume: config.baseResume,
+      jobDescription: config.tailorJd,
+      tailoringPrompt: config.tailoringPrompt,
+      apiKey: config.apiKey,
+      attemptTimeoutMs,
+      maxAttempts: 1,
+      onAttempt: () => undefined,
+    });
+
+    emit({ type: "job_resume_content", index, resumeMarkdown: tailored.content });
+    emitStep(
+      "resume_generated",
+      `Resume generated (attempt ${generateAttempt}/${maxAttempts})`,
+      Date.now() - tailorStarted
+    );
+
+    return saveAndComplete({
+      emit,
+      emitStep,
+      index,
+      url,
+      folderName,
+      companyName: config.companyName,
+      positionName: config.positionName,
+      slotName,
+      outputDir: config.outputDir,
+      resumeNamePrefix: config.resumeNamePrefix,
+      rawJd: config.rawJd,
+      extractedJd: config.extractedJd,
+      resumeMarkdown: tailored.content,
+      docxBuffer: tailored.docxBuffer,
+      jobElapsed,
+    });
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : "Resume generation failed";
+    const msg = raw.replace(
+      /attempt \d+\/\d+/i,
+      `attempt ${generateAttempt}/${maxAttempts}`
+    );
+    if (isRegenerableTailorError(err) && generateAttempt < maxAttempts) {
+      emit({
+        type: "job_need_regenerate",
+        index,
+        url,
+        error: msg,
+        nextAttempt: generateAttempt + 1,
+        maxAttempts,
+        elapsedMs: jobElapsed(),
+        tailoringPrompt: config.tailoringPrompt,
+        baseResume: config.baseResume,
+        slotIndex,
+        tailorJd: config.tailorJd,
+        rawJd: config.rawJd,
+        extractedJd: config.extractedJd,
+        companyName: config.companyName,
+        positionName: config.positionName,
+        resumeType: config.resumeType,
+        folderName,
+        outputDir: config.outputDir,
+        resumeNamePrefix: config.resumeNamePrefix,
+        apiKey: config.apiKey,
+      });
+      emitStep(
+        "resume_generating",
+        `Attempt ${generateAttempt}/${maxAttempts} failed — will retry (${msg.slice(0, 100)})`
+      );
+      return "needs_regenerate";
+    }
+
+    emit({ type: "job_failed", index, url, error: msg, elapsedMs: jobElapsed() });
+    emitStep("moving_next", "Moving to next job...");
+    return "failed";
+  }
+}
 
 /**
  * Process one job URL end-to-end, emitting the same progress events as the batch pipeline.
- * Used by both the batch pipeline and per-job API (parallel on Vercel + localhost).
+ * On Vercel, generate uses 1 attempt per invocation (4.5 min); client retries via
+ * job_need_regenerate up to 3 times. Localhost keeps in-process 3 × 7 min.
  */
 export async function runSingleAutomationJob(
   config: SingleJobConfig,
@@ -105,8 +347,12 @@ export async function runSingleAutomationJob(
   const { url, index, total } = config;
   const jobStartedAt = Date.now();
   const jobElapsed = () => Date.now() - jobStartedAt;
-  const attemptTimeoutMs = config.attemptTimeoutMs ?? RESUME_ATTEMPT_TIMEOUT_MS;
+  const onVercel = Boolean(process.env.VERCEL);
+  const attemptTimeoutMs =
+    config.attemptTimeoutMs ??
+    (onVercel ? DEPLOYED_RESUME_ATTEMPT_TIMEOUT_MS : RESUME_ATTEMPT_TIMEOUT_MS);
   const maxAttempts = config.maxAttempts ?? MAX_RESUME_GENERATE_ATTEMPTS;
+  const generateAttempt = config.generateAttempt ?? 1;
 
   const emitStep = (
     step: PipelineStepId,
@@ -244,12 +490,18 @@ export async function runSingleAutomationJob(
       return "failed";
     }
 
+    // Deployed: 1 attempt per serverless call (4.5 min). Client retries up to 3.
+    // Local: up to 3 attempts in-process (7 min each).
+    const inProcessAttempts = onVercel ? 1 : maxAttempts;
+
     let docxBuffer: Buffer;
     let resumeMarkdown: string;
     try {
       emitStep(
         "resume_generating",
-        `Resume generating (${formatDuration(attemptTimeoutMs)} limit, up to ${maxAttempts} attempts)`
+        onVercel
+          ? `Resume generating attempt ${generateAttempt}/${maxAttempts} (${formatDuration(attemptTimeoutMs)} limit)`
+          : `Resume generating (${formatDuration(attemptTimeoutMs)} limit, up to ${maxAttempts} attempts)`
       );
       const tailorStarted = Date.now();
       const tailored = await tailorResume({
@@ -259,7 +511,7 @@ export async function runSingleAutomationJob(
         tailoringPrompt: config.tailoringPrompt,
         apiKey: config.apiKey,
         attemptTimeoutMs,
-        maxAttempts,
+        maxAttempts: inProcessAttempts,
         onAttempt: (attempt, maxAtt, previousError) => {
           if (attempt === 1) return;
           const reason = previousError
@@ -269,7 +521,7 @@ export async function runSingleAutomationJob(
             : "retrying";
           emitStep(
             "resume_generating",
-            `Resume regenerating (${attempt}/${maxAtt}, ${formatDuration(attemptTimeoutMs)} limit) — ${reason}`
+            `Resume regenerating (${attempt}/${maxAtt}) — ${reason}`
           );
         },
       });
@@ -285,66 +537,63 @@ export async function runSingleAutomationJob(
         tailorMs
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Resume generation failed";
+      const raw = err instanceof Error ? err.message : "Resume generation failed";
+      const msg = raw.replace(
+        /attempt \d+\/\d+/i,
+        `attempt ${generateAttempt}/${maxAttempts}`
+      );
+      if (onVercel && isRegenerableTailorError(err) && generateAttempt < maxAttempts) {
+        emit({
+          type: "job_need_regenerate",
+          index,
+          url,
+          error: msg,
+          nextAttempt: generateAttempt + 1,
+          maxAttempts,
+          elapsedMs: jobElapsed(),
+          tailoringPrompt: config.tailoringPrompt,
+          baseResume,
+          slotIndex,
+          tailorJd,
+          rawJd: rawText,
+          extractedJd: extracted.raw,
+          companyName: extracted.companyName,
+          positionName: extracted.positionName,
+          resumeType: extracted.resumeType,
+          folderName,
+          outputDir: config.outputDir,
+          resumeNamePrefix: config.resumeNamePrefix,
+          apiKey: config.apiKey,
+        });
+        emitStep(
+          "resume_generating",
+          `Attempt ${generateAttempt}/${maxAttempts} failed — will retry (${msg.slice(0, 100)})`
+        );
+        return "needs_regenerate";
+      }
+
       emit({ type: "job_failed", index, url, error: msg, elapsedMs: jobElapsed() });
       emitStep("moving_next", "Moving to next job...");
       return "failed";
     }
 
-    const pdfStarted = Date.now();
-    const pdfBuffer = await pdfLock(() =>
-      withTimeout(STEP_TIMEOUT_MS, "PDF conversion", () => convertDocxToPdf(docxBuffer))
-    ).catch((err) => {
-      console.error(
-        `[pdf] DOCX→PDF failed for job ${index} (${folderName}):`,
-        err instanceof Error ? err.message : err
-      );
-      return null;
-    });
-
-    const saved = await saveJobArtifacts({
-      outputDir: config.outputDir,
+    return saveAndComplete({
+      emit,
+      emitStep,
+      index,
+      url,
       folderName,
+      companyName: extracted.companyName,
+      positionName: extracted.positionName,
+      slotName,
+      outputDir: config.outputDir,
       resumeNamePrefix: config.resumeNamePrefix,
-      jobUrl: url,
       rawJd: rawText,
       extractedJd: extracted.raw,
       resumeMarkdown,
       docxBuffer,
-      pdfBuffer,
+      jobElapsed,
     });
-
-    const hasPdf = !!saved.pdfPath;
-    emitStep(
-      "folder_created",
-      hasPdf
-        ? "Folder created (DOCX + PDF)"
-        : "Folder created (DOCX only — install Word or LibreOffice for PDF)",
-      Date.now() - pdfStarted
-    );
-
-    emit({
-      type: "job_complete",
-      index,
-      folderPath: saved.folderPath,
-      folderName,
-      companyName: extracted.companyName,
-      positionName: extracted.positionName,
-      slotLabel: slotName,
-      hasPdf,
-      elapsedMs: jobElapsed(),
-      artifacts: {
-        jobUrl: url,
-        rawJd: rawText,
-        extractedJd: extracted.raw,
-        resumeMarkdown,
-        docxBase64: docxBuffer.toString("base64"),
-        resumeFileName: `${saved.resumeBaseName}.docx`,
-        pdfBase64: pdfBuffer?.length ? pdfBuffer.toString("base64") : undefined,
-      },
-    });
-    emitStep("moving_next", "Moving to next job...");
-    return "completed";
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unexpected error";
     emit({ type: "job_failed", index, url, error: msg, elapsedMs: jobElapsed() });
