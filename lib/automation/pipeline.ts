@@ -1,112 +1,34 @@
-import type { AutomationProgressEvent, AutomationRunConfig, PipelineStepId } from "./types";
-import { scrapeJobPage } from "./scraper";
-import { extractJobData } from "./extractor";
-import { buildTailorJobDescription } from "./parse-extraction";
-import { resumeTypeToSlotIndex, slotLabel } from "./slot-router";
-import { buildFolderName, buildZipFromEntries, clearOutputDirectory, saveJobArtifacts, type ZipFolderEntry } from "./folder-output";
-import { convertDocxToPdf } from "./docx-to-pdf";
-import {
-  MAX_RESUME_GENERATE_ATTEMPTS,
-  RESUME_ATTEMPT_TIMEOUT_MS,
-  tailorResume,
-} from "@/lib/tailor-resume";
-import {
-  requiresSecurityClearance,
-  securityClearanceSkipReason,
-} from "./jd-filters";
+import type { AutomationProgressEvent, AutomationRunConfig } from "./types";
+import { clearOutputDirectory, buildZipFromEntries, type ZipFolderEntry } from "./folder-output";
+import { runSingleAutomationJob, type ProgressEmitter } from "./run-single-job";
 
-export type ProgressEmitter = (event: AutomationProgressEvent) => void;
+export type { ProgressEmitter } from "./run-single-job";
+export { STEP_TIMEOUT_MS } from "./run-single-job";
 
 export type PipelineOptions = {
   shouldStop?: () => boolean;
-  /** Stop claiming new jobs after this timestamp (ms since epoch). */
-  deadlineAt?: number;
 };
 
 /** Default matches prior app: several resumes at once on one OpenRouter key. */
 export const DEFAULT_CONCURRENCY = 4;
 export const MAX_CONCURRENCY = 10;
-/** Per-step wall-clock limit for scrape / extract / PDF (not resume — resume uses 7m × 3). */
-export const STEP_TIMEOUT_MS = 5 * 60 * 1000;
-/** Leave headroom before Vercel maxDuration (300s) so we can emit failures + ZIP. */
-export const VERCEL_SOFT_DEADLINE_MS = 240_000;
-/** Shorter tailor budget on Vercel so at least a few jobs finish inside maxDuration. */
-export const VERCEL_RESUME_ATTEMPT_TIMEOUT_MS = 90_000;
-export const VERCEL_RESUME_MAX_ATTEMPTS = 2;
 
 function clampConcurrency(value: number | undefined): number {
   if (!Number.isFinite(value)) return DEFAULT_CONCURRENCY;
   return Math.max(1, Math.min(MAX_CONCURRENCY, Math.floor(value as number)));
 }
 
-function formatDuration(ms: number): string {
-  const totalSec = Math.max(0, Math.round(ms / 1000));
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return m > 0 ? `${m}m ${String(s).padStart(2, "0")}s` : `${s}s`;
-}
-
-class StepTimeoutError extends Error {
-  constructor(public readonly stepLabel: string, timeoutMs = STEP_TIMEOUT_MS) {
-    super(`Step "${stepLabel}" exceeded ${formatDuration(timeoutMs)} and was terminated`);
-    this.name = "StepTimeoutError";
-  }
-}
-
-async function withTimeout<T>(ms: number, label: string, fn: () => Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      fn(),
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new StepTimeoutError(label, ms)), ms);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-/** Run fn; on timeout, retry once (scrape / extract). */
-async function withTimeoutRetry<T>(
-  label: string,
-  fn: () => Promise<T>,
-  onRetry?: (error: string) => void
-): Promise<T> {
-  try {
-    return await withTimeout(STEP_TIMEOUT_MS, label, fn);
-  } catch (err) {
-    if (!(err instanceof StepTimeoutError)) throw err;
-    onRetry?.(err.message);
-    return withTimeout(STEP_TIMEOUT_MS, `${label} (retry)`, fn);
-  }
-}
-
-/** Serialize Word/LibreOffice PDF conversion — COM is not safe in parallel. */
-function createPdfLock() {
-  let chain: Promise<unknown> = Promise.resolve();
-  return function withPdfLock<T>(fn: () => Promise<T>): Promise<T> {
-    const run = chain.then(fn, fn);
-    chain = run.then(
-      () => undefined,
-      () => undefined
-    );
-    return run;
-  };
-}
-
 async function mapPool(
   total: number,
   concurrency: number,
   worker: (index: number) => Promise<void>,
-  options?: { shouldStop?: () => boolean; canClaim?: () => boolean }
+  shouldStop?: () => boolean
 ): Promise<void> {
   let next = 0;
 
   async function runWorker() {
     while (true) {
-      if (options?.shouldStop?.()) return;
-      if (options?.canClaim && !options.canClaim()) return;
+      if (shouldStop?.()) return;
       const i = next++;
       if (i >= total) return;
       await worker(i);
@@ -117,6 +39,10 @@ async function mapPool(
   await Promise.all(Array.from({ length: poolSize }, () => runWorker()));
 }
 
+/**
+ * In-process batch (used by /api/automation/run). Prefer client-side parallel
+ * /api/automation/run-job calls on Vercel so each job gets its own time budget.
+ */
 export async function runAutomationPipeline(
   config: AutomationRunConfig,
   emit: ProgressEmitter,
@@ -128,14 +54,8 @@ export async function runAutomationPipeline(
   let skipped = 0;
   const completedFolderPaths: string[] = [];
   const zipEntries: ZipFolderEntry[] = [];
-  const finishedIndexes = new Set<number>();
-  const onVercel = Boolean(process.env.VERCEL);
-  const concurrency = onVercel ? 1 : clampConcurrency(config.concurrency);
-  const withPdfLock = createPdfLock();
+  const concurrency = clampConcurrency(config.concurrency);
   const batchStartedAt = Date.now();
-  const deadlineAt =
-    options?.deadlineAt ??
-    (onVercel ? batchStartedAt + VERCEL_SOFT_DEADLINE_MS : undefined);
 
   emit({ type: "batch_start", total, startedAt: batchStartedAt });
   clearOutputDirectory(config.outputDir);
@@ -146,316 +66,64 @@ export async function runAutomationPipeline(
     async (i) => {
       if (options?.shouldStop?.()) return;
 
-      const url = config.urls[i];
-      const index = i + 1;
-      const jobStartedAt = Date.now();
-      const jobElapsed = () => Date.now() - jobStartedAt;
-      const markFinished = () => finishedIndexes.add(index);
-
-      const emitStep = (
-        step: PipelineStepId,
-        message: string,
-        stepElapsedMs?: number
-      ) => {
-        emit({
-          type: "step",
-          index,
-          step,
-          message:
-            stepElapsedMs != null
-              ? `${message} (${formatDuration(stepElapsedMs)})`
-              : message,
-          elapsedMs: jobElapsed(),
-          stepElapsedMs,
-        });
-      };
-
-      emit({ type: "job_start", index, total, url, startedAt: jobStartedAt });
-
-      try {
-        let rawText: string;
-        try {
-          const scrapeStarted = Date.now();
-          rawText = await withTimeoutRetry("URL scrape", () => scrapeJobPage(url), (msg) => {
-            emitStep("url_loaded", `Scrape timed out — retrying… ${msg}`);
-          });
-          emit({ type: "job_raw_jd", index, rawJd: rawText });
-          emitStep("url_loaded", "URL loaded", Date.now() - scrapeStarted);
-
-          if (requiresSecurityClearance(rawText)) {
-            emit({
-              type: "job_skipped",
-              index,
-              url,
-              error: securityClearanceSkipReason(),
-              elapsedMs: jobElapsed(),
-            });
-            skipped++;
-            markFinished();
-            emitStep("moving_next", "Moving to next job...");
-            return;
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : "Failed to load URL";
-          emit({ type: "job_skipped", index, url, error: msg, elapsedMs: jobElapsed() });
-          skipped++;
-          markFinished();
-          emitStep("moving_next", "Moving to next job...");
-          return;
-        }
-
-        if (options?.shouldStop?.()) {
-          emit({
-            type: "job_failed",
-            index,
-            url,
-            error: "Batch stopped",
-            elapsedMs: jobElapsed(),
-          });
-          failed++;
-          markFinished();
-          return;
-        }
-
-        let extracted;
-        try {
-          const extractStarted = Date.now();
-          extracted = await withTimeoutRetry(
-            "JD extraction",
-            () =>
-              extractJobData(
-                config.extractionPrompt,
-                rawText,
-                config.apiKey,
-                url
-              ),
-            (msg) => {
-              emitStep("jd_extracted", `Extraction timed out — regenerating… ${msg}`);
-            }
-          );
-          emit({ type: "job_extracted_jd", index, extractedJd: extracted.raw });
-          emitStep("jd_extracted", "JD extracted", Date.now() - extractStarted);
-
-          if (requiresSecurityClearance(`${rawText}\n${extracted.raw}`)) {
-            emit({
-              type: "job_skipped",
-              index,
-              url,
-              error: securityClearanceSkipReason(),
-              elapsedMs: jobElapsed(),
-            });
-            skipped++;
-            markFinished();
-            emitStep("moving_next", "Moving to next job...");
-            return;
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : "Extraction failed";
-          emit({ type: "job_failed", index, url, error: msg, elapsedMs: jobElapsed() });
-          failed++;
-          markFinished();
-          emitStep("moving_next", "Moving to next job...");
-          return;
-        }
-
-        const slotIndex = resumeTypeToSlotIndex(extracted.resumeType);
-        const slotName = slotLabel(slotIndex);
-        const folderName = buildFolderName(
-          index,
-          extracted.companyName,
-          extracted.positionName
-        );
-
-        emit({
-          type: "job_meta",
-          index,
-          companyName: extracted.companyName,
-          positionName: extracted.positionName,
-          resumeType: extracted.resumeType,
-          slotLabel: slotName,
-          folderName,
-        });
-
-        emitStep("resume_type", `Resume slot selected: ${slotName}`);
-
-        const tailorJd = buildTailorJobDescription(extracted);
-        const baseResume = config.baseResumes[slotIndex];
-        if (!baseResume?.trim()) {
-          throw new Error(`Base resume for ${slotName} slot is empty.`);
-        }
-
-        if (options?.shouldStop?.()) {
-          emit({
-            type: "job_failed",
-            index,
-            url,
-            error: "Batch stopped",
-            elapsedMs: jobElapsed(),
-          });
-          failed++;
-          markFinished();
-          return;
-        }
-
-        let docxBuffer: Buffer;
-        let resumeMarkdown: string;
-        const resumeAttemptMs = onVercel
-          ? VERCEL_RESUME_ATTEMPT_TIMEOUT_MS
-          : RESUME_ATTEMPT_TIMEOUT_MS;
-        const resumeMaxAttempts = onVercel
-          ? VERCEL_RESUME_MAX_ATTEMPTS
-          : MAX_RESUME_GENERATE_ATTEMPTS;
-        try {
-          emitStep(
-            "resume_generating",
-            `Resume generating (${formatDuration(resumeAttemptMs)} limit, up to ${resumeMaxAttempts} attempts)`
-          );
-          const tailorStarted = Date.now();
-          const tailored = await tailorResume({
-            slotIndex,
-            baseResume,
-            jobDescription: tailorJd,
-            tailoringPrompt: config.tailoringPrompt,
-            apiKey: config.apiKey,
-            attemptTimeoutMs: resumeAttemptMs,
-            maxAttempts: resumeMaxAttempts,
-            onAttempt: (attempt, maxAttempts, previousError) => {
-              if (attempt === 1) return;
-              const reason = previousError
-                ? previousError.length > 120
-                  ? `${previousError.slice(0, 120)}…`
-                  : previousError
-                : "retrying";
-              emitStep(
-                "resume_generating",
-                `Resume regenerating (${attempt}/${maxAttempts}, ${formatDuration(resumeAttemptMs)} limit) — ${reason}`
-              );
-            },
-          });
-          docxBuffer = tailored.docxBuffer;
-          resumeMarkdown = tailored.content;
-          emit({ type: "job_resume_content", index, resumeMarkdown });
-          const tailorMs = Date.now() - tailorStarted;
-          emitStep(
-            "resume_generated",
-            tailored.attempts > 1
-              ? `Resume generated (after ${tailored.attempts} attempts)`
-              : "Resume generated",
-            tailorMs
-          );
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : "Resume generation failed";
-          emit({ type: "job_failed", index, url, error: msg, elapsedMs: jobElapsed() });
-          failed++;
-          markFinished();
-          emitStep("moving_next", "Moving to next job...");
-          return;
-        }
-
-        const pdfStarted = Date.now();
-        const pdfBuffer = await withPdfLock(() =>
-          withTimeout(STEP_TIMEOUT_MS, "PDF conversion", () => convertDocxToPdf(docxBuffer))
-        ).catch((err) => {
-          console.error(
-            `[pdf] DOCX→PDF failed for job ${index} (${folderName}):`,
-            err instanceof Error ? err.message : err
-          );
-          return null;
-        });
-
-        const saved = await saveJobArtifacts({
+      const outcome = await runSingleAutomationJob(
+        {
+          url: config.urls[i],
+          index: i + 1,
+          total,
+          extractionPrompt: config.extractionPrompt,
+          tailoringPrompt: config.tailoringPrompt,
+          baseResumes: config.baseResumes,
           outputDir: config.outputDir,
-          folderName,
           resumeNamePrefix: config.resumeNamePrefix,
-          jobUrl: url,
-          rawJd: rawText,
-          extractedJd: extracted.raw,
-          resumeMarkdown,
-          docxBuffer,
-          pdfBuffer,
-        });
+          apiKey: config.apiKey,
+        },
+        (event: AutomationProgressEvent) => {
+          emit(event);
+          if (event.type === "job_complete") {
+            completedFolderPaths.push(event.folderPath);
+            if (event.artifacts) {
+              const files: ZipFolderEntry["files"] = [
+                {
+                  name: "job_url.txt",
+                  data: Buffer.from(event.artifacts.jobUrl + "\n", "utf8"),
+                },
+                {
+                  name: "raw_jd.txt",
+                  data: Buffer.from(event.artifacts.rawJd, "utf8"),
+                },
+                {
+                  name: "extracted_jd.txt",
+                  data: Buffer.from(event.artifacts.extractedJd, "utf8"),
+                },
+                {
+                  name: "updated_resume.md",
+                  data: Buffer.from(event.artifacts.resumeMarkdown, "utf8"),
+                },
+                {
+                  name: event.artifacts.resumeFileName,
+                  data: Buffer.from(event.artifacts.docxBase64, "base64"),
+                },
+              ];
+              if (event.artifacts.pdfBase64) {
+                files.push({
+                  name: event.artifacts.resumeFileName.replace(/\.docx$/i, ".pdf"),
+                  data: Buffer.from(event.artifacts.pdfBase64, "base64"),
+                });
+              }
+              zipEntries.push({ folderName: event.folderName, files });
+            }
+          }
+        },
+        { shouldStop: options?.shouldStop }
+      );
 
-        const hasPdf = !!saved.pdfPath;
-        emitStep(
-          "folder_created",
-          hasPdf
-            ? "Folder created (DOCX + PDF)"
-            : "Folder created (DOCX only — install Word or LibreOffice for PDF)",
-          Date.now() - pdfStarted
-        );
-
-        completedFolderPaths.push(saved.folderPath);
-
-        const textFiles: ZipFolderEntry["files"] = [
-          { name: "job_url.txt", data: Buffer.from(url + "\n", "utf8") },
-          { name: "raw_jd.txt", data: Buffer.from(rawText, "utf8") },
-          { name: "extracted_jd.txt", data: Buffer.from(extracted.raw, "utf8") },
-          { name: "updated_resume.md", data: Buffer.from(resumeMarkdown, "utf8") },
-          { name: `${saved.resumeBaseName}.docx`, data: docxBuffer },
-        ];
-        if (pdfBuffer?.length) {
-          textFiles.push({ name: `${saved.resumeBaseName}.pdf`, data: pdfBuffer });
-        }
-        zipEntries.push({ folderName, files: textFiles });
-
-        emit({
-          type: "job_complete",
-          index,
-          folderPath: saved.folderPath,
-          folderName,
-          companyName: extracted.companyName,
-          positionName: extracted.positionName,
-          slotLabel: slotName,
-          hasPdf,
-          elapsedMs: jobElapsed(),
-          artifacts: {
-            jobUrl: url,
-            rawJd: rawText,
-            extractedJd: extracted.raw,
-            resumeMarkdown,
-            docxBase64: docxBuffer.toString("base64"),
-            resumeFileName: `${saved.resumeBaseName}.docx`,
-            pdfBase64: pdfBuffer?.length ? pdfBuffer.toString("base64") : undefined,
-          },
-        });
-        completed++;
-        markFinished();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Unexpected error";
-        emit({ type: "job_failed", index, url, error: msg, elapsedMs: jobElapsed() });
-        failed++;
-        markFinished();
-      }
-
-      emitStep("moving_next", "Moving to next job...");
+      if (outcome === "completed") completed++;
+      else if (outcome === "failed") failed++;
+      else skipped++;
     },
-    {
-      shouldStop: options?.shouldStop,
-      canClaim: () => {
-        if (options?.shouldStop?.()) return false;
-        if (deadlineAt != null && Date.now() >= deadlineAt) return false;
-        return true;
-      },
-    }
+    options?.shouldStop
   );
-
-  // Jobs never started (Vercel soft deadline) — fail explicitly so the UI does not hang.
-  for (let i = 0; i < total; i++) {
-    const index = i + 1;
-    if (finishedIndexes.has(index)) continue;
-    const url = config.urls[i];
-    emit({
-      type: "job_failed",
-      index,
-      url,
-      error: onVercel
-        ? "Skipped: Vercel function time limit (~4 min soft / 5 min hard). Run remaining URLs on localhost or in smaller batches of 2–3."
-        : "Skipped: batch ended before this job started",
-      elapsedMs: 0,
-    });
-    failed++;
-    finishedIndexes.add(index);
-  }
 
   let zipBase64: string | undefined;
   let zipFileName: string | undefined;

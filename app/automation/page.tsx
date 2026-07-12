@@ -165,7 +165,6 @@ export default function AutomationDashboard() {
 
   useEffect(() => {
     if (!batchStartedAt) return;
-    // Keep ticking while running, or until we freeze elapsed on batch_complete.
     if (!running && batchElapsedMs > 0) return;
     const id = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => window.clearInterval(id);
@@ -238,11 +237,6 @@ export default function AutomationDashboard() {
       if (event.type === "batch_start") {
         setBatchStartedAt(Date.now());
         setBatchElapsedMs(0);
-        setNowTick(Date.now());
-        return;
-      }
-      if (event.type === "heartbeat") {
-        setNowTick(event.at || Date.now());
         return;
       }
       if (event.type === "job_start") {
@@ -576,121 +570,119 @@ export default function AutomationDashboard() {
     setSkipped(0);
     setBatchFolderPaths([]);
     batchFilesRef.current = [];
-    setBatchStartedAt(Date.now());
+    const startedAt = Date.now();
+    setBatchStartedAt(startedAt);
     setBatchElapsedMs(0);
+    setNowTick(startedAt);
     setJobs(urls.map((u, i) => createJobRow(i + 1, u)));
 
     const controller = new AbortController();
     abortRef.current = controller;
-    let batchCompleted = 0;
-    let batchFolders: string[] = [];
-    let inlineZip: { base64: string; fileName: string } | undefined;
-    let sawBatchComplete = false;
-    const startedAt = Date.now();
+    const folderPaths: string[] = [];
+    const poolSize = Math.max(1, Math.min(10, concurrency));
 
-    const failIncompleteJobs = (reason: string) => {
-      setJobs((prev) =>
-        prev.map((j) => {
-          if (
-            j.status === "completed" ||
-            j.status === "failed" ||
-            j.status === "skipped"
-          ) {
-            return j;
-          }
-          return {
-            ...j,
-            status: "failed",
-            statusLabel: "Interrupted",
-            error: reason,
-            updatedAt: Date.now(),
-          };
-        })
-      );
-    };
-
-    try {
-      const res = await fetch("/api/automation/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          urlsText,
-          extractionPrompt: settings.extractionPrompt,
-          tailoringPrompt: settings.tailoringPrompt,
-          baseResumes: settings.baseResumes,
-          outputDir: settings.outputDir,
-          resumeNamePrefix: resumeNamePrefix.trim(),
-          apiKey: settings.apiKey.trim() || undefined,
-          concurrency:
-            typeof window !== "undefined" &&
-            window.location.hostname !== "localhost" &&
-            window.location.hostname !== "127.0.0.1"
-              ? 1
-              : concurrency,
-        }),
-        signal: controller.signal,
-      });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error ?? `Request failed (${res.status})`);
-      }
-
+    const readJobStream = async (res: Response) => {
       const reader = res.body?.getReader();
       if (!reader) throw new Error("No response stream");
-
       const decoder = new TextDecoder();
       let buffer = "";
-
       while (true) {
         const { done, value } = await reader.read();
         if (done || stopRef.current) break;
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
-
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed.startsWith("data:")) continue;
           const json = trimmed.slice(5).trim();
           if (!json) continue;
-          const event = JSON.parse(json) as AutomationProgressEvent | { type: "error"; message?: string };
-          if (event.type === "error") throw new Error(event.message ?? "Pipeline error");
-          if (event.type === "batch_complete") {
-            sawBatchComplete = true;
-            batchCompleted = event.completed;
-            batchFolders = event.folderPaths;
-            if (event.zipBase64) {
-              inlineZip = {
-                base64: event.zipBase64,
-                fileName: event.zipFileName || `${resumeNamePrefix.trim() || "resume"}_resumes.zip`,
-              };
-            }
+          const event = JSON.parse(json) as
+            | AutomationProgressEvent
+            | { type: "error"; message?: string };
+          if (event.type === "error") {
+            throw new Error(event.message ?? "Job failed");
+          }
+          if (event.type === "heartbeat") {
+            setNowTick(event.at || Date.now());
+            continue;
+          }
+          if (event.type === "job_complete") {
+            folderPaths.push(event.folderPath);
           }
           handleEvent(event);
         }
       }
+    };
 
-      if (!sawBatchComplete && !stopRef.current) {
-        const reason =
-          "Connection ended before the batch finished (common on Vercel after ~5 minutes). Incomplete jobs were stopped — use localhost or run 2–3 URLs at a time.";
-        failIncompleteJobs(reason);
-        setError(reason);
-        setBatchElapsedMs(Date.now() - startedAt);
+    const runOneJob = async (url: string, index: number) => {
+      if (stopRef.current) return;
+      const res = await fetch("/api/automation/run-job", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url,
+          index,
+          total: urls.length,
+          extractionPrompt: settings.extractionPrompt,
+          tailoringPrompt: settings.tailoringPrompt,
+          baseResumes: settings.baseResumes,
+          outputDir: settings.outputDir,
+          resumeNamePrefix: resumeNamePrefix.trim(),
+          apiKey: settings.apiKey.trim() || undefined,
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const message = data.error ?? `Request failed (${res.status})`;
+        handleEvent({
+          type: "job_failed",
+          index,
+          url,
+          error: message,
+        });
+        return;
       }
+      await readJobStream(res);
+    };
 
-      if (batchCompleted > 0 && !stopRef.current) {
-        await downloadZip(resumeNamePrefix.trim(), batchFolders, inlineZip);
-      }
-    } catch (err) {
-      if (err instanceof Error && err.name !== "AbortError") {
-        setError(err.message);
-        if (!sawBatchComplete) {
-          failIncompleteJobs(err.message);
-          setBatchElapsedMs(Date.now() - startedAt);
+    try {
+      handleEvent({ type: "batch_start", total: urls.length, startedAt });
+
+      await fetch("/api/automation/prepare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outputDir: settings.outputDir }),
+        signal: controller.signal,
+      }).catch(() => null);
+
+      let next = 0;
+      const workers = Array.from({ length: Math.min(poolSize, urls.length) }, async () => {
+        while (true) {
+          if (stopRef.current) return;
+          const i = next++;
+          if (i >= urls.length) return;
+          try {
+            await runOneJob(urls[i], i + 1);
+          } catch (err) {
+            if (err instanceof Error && err.name === "AbortError") return;
+            handleEvent({
+              type: "job_failed",
+              index: i + 1,
+              url: urls[i],
+              error: err instanceof Error ? err.message : "Job failed",
+            });
+          }
         }
-      }
-    } finally {
+      });
+
+      await Promise.all(workers);
+
+      const elapsed = Date.now() - startedAt;
+      setBatchElapsedMs(elapsed);
+      setBatchFolderPaths([...folderPaths]);
+
       setJobs((prev) => {
         const c = prev.filter((j) => j.status === "completed").length;
         const f = prev.filter((j) => j.status === "failed").length;
@@ -700,9 +692,16 @@ export default function AutomationDashboard() {
         setSkipped(s);
         return prev;
       });
-      if (!sawBatchComplete) {
-        setBatchElapsedMs((prev) => prev || Date.now() - startedAt);
+
+      if ((folderPaths.length > 0 || batchFilesRef.current.length > 0) && !stopRef.current) {
+        await downloadZip(resumeNamePrefix.trim(), folderPaths);
       }
+    } catch (err) {
+      if (err instanceof Error && err.name !== "AbortError") {
+        setError(err.message);
+      }
+    } finally {
+      setBatchElapsedMs((prev) => prev || Date.now() - startedAt);
       setRunning(false);
       abortRef.current = null;
     }
@@ -760,11 +759,10 @@ export default function AutomationDashboard() {
 
       {isProductionHost && (
         <div className="art-banner art-banner--warn" role="status">
-          <strong>Vercel hard-stops batches after ~5 minutes.</strong> Only a few
-          jobs can finish per run (no Playwright, concurrency forced to 1). Jobs
-          that cannot start are marked failed instead of spinning forever. For
-          10+ URLs use <code>npm run dev</code> on localhost, or run small batches
-          of 2–3 URLs on Vercel. PDF still requires local Word/LibreOffice.
+          <strong>Same parallel engine as localhost.</strong> Jobs run concurrently via
+          separate API calls (your Parallel jobs setting). Playwright/PDF still need a
+          local machine — on Vercel, scraping uses HTTP fallback and PDF is skipped when
+          Word/LibreOffice are unavailable.
         </div>
       )}
 
