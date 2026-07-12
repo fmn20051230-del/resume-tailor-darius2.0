@@ -42,13 +42,30 @@ export function getExtractionModel(): string {
   return process.env.EXTRACTION_MODEL?.trim() || DEFAULT_EXTRACTION_MODEL;
 }
 
+/** Transient OpenRouter/network failures that should be retried (up to 3 times). */
+export function isRetryableOpenRouterError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /invalid json|Unexpected end of JSON|JSON input|empty content|ECONNRESET|ETIMEDOUT|ECONNREFUSED|socket|429|502|503|504|rate limit|overloaded|fetch failed|network|LLM returned empty|Premature close|terminated|other side closed/i.test(
+    msg
+  );
+}
+
 export async function completeChat(
   apiKey: string,
   message: string,
   model: string,
-  options?: { reasoning?: boolean; maxRetries?: number; signal?: AbortSignal }
+  options?: {
+    reasoning?: boolean;
+    /** Default 3. Retries transient errors including empty/invalid JSON bodies. */
+    maxRetries?: number;
+    signal?: AbortSignal;
+    /** Optional key pool — each retry picks a random key from this list. */
+    keys?: string[];
+  }
 ): Promise<string> {
-  const maxRetries = options?.maxRetries ?? 3;
+  const maxRetries = Math.max(1, options?.maxRetries ?? 3);
+  const keyPool =
+    options?.keys && options.keys.length > 0 ? options.keys : [apiKey];
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -56,8 +73,15 @@ export async function completeChat(
       throw new Error("Resume generation timed out");
     }
 
-    const client = createOpenRouterClient(apiKey);
+    const { key } = pickRandomApiKey(keyPool);
+    const client = createOpenRouterClient(key);
     try {
+      if (attempt > 1) {
+        console.warn(
+          `[openrouter] Retry ${attempt}/${maxRetries}: ${lastError?.message ?? "previous attempt failed"}`
+        );
+      }
+
       const response = await client.chat.completions.create(
         {
           model,
@@ -79,13 +103,16 @@ export async function completeChat(
         throw new Error("Resume generation timed out");
       }
       const msg = err instanceof Error ? err.message : String(err);
-      if (/aborted|timeout|timed out/i.test(msg)) {
+      if (/aborted|timeout|timed out/i.test(msg) && options?.signal?.aborted) {
         throw new Error("Resume generation timed out");
       }
       lastError = err instanceof Error ? err : new Error("LLM request failed");
-      if (attempt < maxRetries) {
-        await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+
+      const retryable = isRetryableOpenRouterError(err) || /aborted|timeout|timed out/i.test(msg);
+      if (!retryable || attempt >= maxRetries) {
+        break;
       }
+      await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
     }
   }
 

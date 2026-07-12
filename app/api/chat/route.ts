@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import type { ChatCompletionChunk } from "openai/resources/chat/completions";
 import { NextRequest, NextResponse } from "next/server";
 import { appendLog } from "@/lib/generation-log";
+import { isRetryableOpenRouterError } from "@/lib/openrouter";
 
 function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get("x-forwarded-for");
@@ -43,6 +44,83 @@ function createClient(apiKey: string) {
   });
 }
 
+type StreamOk = {
+  contentChunks: string[];
+  finishReason: string | null;
+  threadIndex: number;
+};
+
+/**
+ * Create + fully consume one OpenRouter stream. Retries up to 3 times on
+ * invalid/empty JSON bodies and other transient failures before any content
+ * is returned to the client.
+ */
+async function generateWithRetries(
+  keys: string[],
+  message: string,
+  usingUserKey: boolean
+): Promise<StreamOk> {
+  const maxAttempts = 3;
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { key: currentKey, threadIndex: currentThread } = getNextApiKey(keys);
+    const attemptClient = createClient(currentKey);
+    if (attempt === 1) {
+      console.log(
+        usingUserKey
+          ? "[chat] Using user-provided API key"
+          : `[chat] Using thread ${currentThread + 1} of ${keys.length}`
+      );
+    } else {
+      console.warn(
+        `[chat] Retry ${attempt}/${maxAttempts}, thread ${currentThread + 1}: ${lastError?.message ?? ""}`
+      );
+    }
+
+    try {
+      const stream = await attemptClient.chat.completions.create({
+        model: "deepseek/deepseek-v4-flash",
+        messages: [{ role: "user", content: message }],
+        reasoning: { enabled: true },
+        stream: true,
+      } as Parameters<typeof attemptClient.chat.completions.create>[0]);
+
+      const contentChunks: string[] = [];
+      let lastFinishReason: string | null = null;
+
+      for await (const chunk of stream as AsyncIterable<ChatCompletionChunk>) {
+        const delta = chunk.choices?.[0]?.delta;
+        const content = delta?.content;
+        if (typeof content === "string" && content) {
+          contentChunks.push(content);
+        }
+        if (chunk.choices?.[0]?.finish_reason != null) {
+          lastFinishReason = chunk.choices[0].finish_reason;
+        }
+      }
+
+      if (contentChunks.length === 0 || !contentChunks.join("").trim()) {
+        throw new Error("LLM returned empty content");
+      }
+
+      return {
+        contentChunks,
+        finishReason: lastFinishReason,
+        threadIndex: currentThread,
+      };
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error("LLM request failed");
+      if (!isRetryableOpenRouterError(err) || attempt >= maxAttempts) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
+    }
+  }
+
+  throw lastError ?? new Error("LLM request failed");
+}
+
 export async function POST(request: NextRequest) {
   let body: { message?: string; generatedFileName?: string; apiKey?: string };
   try {
@@ -81,93 +159,51 @@ export async function POST(request: NextRequest) {
       ? body.generatedFileName.trim()
       : "";
 
-  const maxAttempts = 3;
-  let lastError: Error | null = null;
+  try {
+    const result = await generateWithRetries(keys, message, usingUserKey);
+    const encoder = new TextEncoder();
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const { key: currentKey, threadIndex: currentThread } = getNextApiKey(keys);
-    const attemptClient = createClient(currentKey);
-    if (attempt === 1) {
-      console.log(
-        usingUserKey
-          ? "[chat] Using user-provided API key"
-          : `[chat] Using thread ${currentThread + 1} of ${keys.length}`
-      );
-    } else {
-      console.log(`[chat] Retry ${attempt}/${maxAttempts}, thread ${currentThread + 1}`);
-    }
-
-    try {
-      const stream = await attemptClient.chat.completions.create({
-        model: "deepseek/deepseek-v4-flash",
-        messages: [{ role: "user", content: message }],
-        reasoning: { enabled: true },
-        stream: true,
-      } as Parameters<typeof attemptClient.chat.completions.create>[0]);
-      
-
-      let fullContent = "";
-      let lastFinishReason: string | null = null;
-      const encoder = new TextEncoder();
-
-      const readable = new ReadableStream({
-        async start(controller) {
-          try {
-            for await (const chunk of stream as AsyncIterable<ChatCompletionChunk>) {
-              const delta = chunk.choices?.[0]?.delta;
-              const content = delta?.content;
-              if (typeof content === "string" && content) {
-                fullContent += content;
-                controller.enqueue(encoder.encode(JSON.stringify({ content }) + "\n"));
-              }
-              if (chunk.choices?.[0]?.finish_reason != null) {
-                lastFinishReason = chunk.choices[0].finish_reason;
-              }
-            }
-            controller.enqueue(
-              encoder.encode(
-                JSON.stringify({
-                  done: true,
-                  reasoning_details: undefined,
-                  role: "assistant",
-                  finish_reason: lastFinishReason ?? "stop",
-                }) + "\n"
-              )
-            );
-            if (generatedFileName) {
-              await appendLog({
-                requested_datetime: new Date().toISOString(),
-                ip: clientIp,
-                generated_filename: generatedFileName,
-                threadIndex: currentThread,
-              });
-            }
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : "Stream error";
-            controller.enqueue(encoder.encode(JSON.stringify({ error: msg }) + "\n"));
-          } finally {
-            controller.close();
+    const readable = new ReadableStream({
+      async start(controller) {
+        try {
+          for (const content of result.contentChunks) {
+            controller.enqueue(encoder.encode(JSON.stringify({ content }) + "\n"));
           }
-        },
-      });
+          controller.enqueue(
+            encoder.encode(
+              JSON.stringify({
+                done: true,
+                reasoning_details: undefined,
+                role: "assistant",
+                finish_reason: result.finishReason ?? "stop",
+              }) + "\n"
+            )
+          );
+          if (generatedFileName) {
+            await appendLog({
+              requested_datetime: new Date().toISOString(),
+              ip: clientIp,
+              generated_filename: generatedFileName,
+              threadIndex: result.threadIndex,
+            });
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Stream error";
+          controller.enqueue(encoder.encode(JSON.stringify({ error: msg }) + "\n"));
+        } finally {
+          controller.close();
+        }
+      },
+    });
 
-      return new NextResponse(readable, {
-        headers: {
-          "Content-Type": "application/x-ndjson",
-          "Transfer-Encoding": "chunked",
-        },
-      });
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error("LLM request failed");
-      if (attempt < maxAttempts) {
-        await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
-      }
-    }
+    return new NextResponse(readable, {
+      headers: {
+        "Content-Type": "application/x-ndjson",
+        "Transfer-Encoding": "chunked",
+      },
+    });
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : "LLM request failed";
+    return NextResponse.json({ error: errorMessage }, { status: 502 });
   }
-
-  const errorMessage = lastError?.message ?? "LLM request failed";
-  return NextResponse.json(
-    { error: errorMessage },
-    { status: 502 }
-  );
 }

@@ -945,8 +945,9 @@ export default function AutomationDashboard() {
         <div className="art-banner art-banner--warn" role="status">
           <strong>Same parallel engine as localhost.</strong> Jobs run concurrently via
           separate API calls (your Parallel jobs setting). Playwright still needs a local
-          machine (Vercel uses HTTP scrape fallback). PDF needs{" "}
-          <code>CONVERTAPI_SECRET</code> in Vercel env — without it, ZIPs include DOCX only.
+          machine (Vercel uses HTTP scrape fallback). PDF prefers Word/LibreOffice or{" "}
+          <code>CONVERTAPI_SECRET</code>; without those, a plain-text PDF fallback is still
+          included in the ZIP.
         </div>
       )}
 
@@ -1358,8 +1359,7 @@ export default function AutomationDashboard() {
                   <li>📄 {resumeFileBase}.docx</li>
                   <li>
                     {activeJob.hasPdf ? "📄" : "⚠"} {resumeFileBase}.pdf
-                    {!activeJob.hasPdf &&
-                      " (needs Word/LibreOffice locally, or CONVERTAPI_SECRET on Vercel)"}
+                    {!activeJob.hasPdf && " (PDF conversion failed)"}
                   </li>
                   <li>🔗 job_url.txt</li>
                   <li>📝 raw_jd.txt</li>

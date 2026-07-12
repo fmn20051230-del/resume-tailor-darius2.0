@@ -4,7 +4,7 @@ import { extractJobData, EXTRACTION_ATTEMPT_TIMEOUT_MS } from "./extractor";
 import { buildTailorJobDescription } from "./parse-extraction";
 import { resumeTypeToSlotIndex, slotLabel } from "./slot-router";
 import { buildFolderName, saveJobArtifacts } from "./folder-output";
-import { convertDocxToPdf } from "./docx-to-pdf";
+import { convertResumeToPdfBuffer } from "./docx-to-pdf";
 import {
   MAX_RESUME_GENERATE_ATTEMPTS,
   RESUME_ATTEMPT_TIMEOUT_MS,
@@ -140,7 +140,12 @@ async function saveAndComplete(args: {
 }): Promise<"completed"> {
   const pdfStarted = Date.now();
   const pdfBuffer = await pdfLock(() =>
-    withTimeout(STEP_TIMEOUT_MS, "PDF conversion", () => convertDocxToPdf(args.docxBuffer))
+    withTimeout(STEP_TIMEOUT_MS, "PDF conversion", () =>
+      convertResumeToPdfBuffer({
+        docxBuffer: args.docxBuffer,
+        resumeMarkdown: args.resumeMarkdown,
+      })
+    )
   ).catch((err) => {
     console.error(
       `[pdf] DOCX→PDF failed for job ${args.index} (${args.folderName}):`,
@@ -166,7 +171,7 @@ async function saveAndComplete(args: {
     "folder_created",
     hasPdf
       ? "Folder created (DOCX + PDF)"
-      : "Folder created (DOCX only — Word/LibreOffice locally, or CONVERTAPI_SECRET on Vercel)",
+      : "Folder created (DOCX only — PDF conversion failed)",
     Date.now() - pdfStarted
   );
 

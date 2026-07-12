@@ -6,6 +6,7 @@ import { fillTemplateDocx } from "@/lib/fill-template-docx";
 import {
   completeChat,
   getTailorModel,
+  isRetryableOpenRouterError,
   pickRandomApiKey,
   resolveApiKeys,
 } from "@/lib/openrouter";
@@ -78,6 +79,7 @@ export class ResumeAttemptTimeoutError extends Error {
 
 function isRegenerableResumeError(err: unknown): boolean {
   if (err instanceof ResumeAttemptTimeoutError) return true;
+  if (isRetryableOpenRouterError(err)) return true;
   const msg = err instanceof Error ? err.message : String(err);
   return /missing a Summary section|missing work experience|missing job titles|Please regenerate|timed out|timeout|exceeded .+ and was terminated/i.test(
     msg
@@ -143,7 +145,6 @@ export async function tailorResume(input: TailorResumeInput): Promise<TailorResu
     throw new Error("Nothing to send. Check prompt, resume, and JD.");
   }
 
-  const { key } = pickRandomApiKey(keys);
   let lastError: Error | null = null;
   const budgetStarted = Date.now();
   const maxAttempts = Math.max(
@@ -174,6 +175,9 @@ export async function tailorResume(input: TailorResumeInput): Promise<TailorResu
         ? baseMessage
         : `${baseMessage}\n\n${buildRetryNudge(previousError)}`;
 
+    // Fresh key each outer attempt so a bad/throttled key does not stick.
+    const { key } = pickRandomApiKey(keys);
+
     try {
       const result = await runWithTimeout(
         attemptTimeoutMs,
@@ -182,7 +186,8 @@ export async function tailorResume(input: TailorResumeInput): Promise<TailorResu
         async (signal) => {
           const content = await completeChat(key, message, getTailorModel(), {
             reasoning: true,
-            maxRetries: 2,
+            maxRetries: 3,
+            keys,
             signal,
           });
           const docxBuffer = fillTemplateDocx(content, input.baseResume);
@@ -192,7 +197,7 @@ export async function tailorResume(input: TailorResumeInput): Promise<TailorResu
       return result;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      // Missing Summary / experience / titles → regenerate automatically (up to maxAttempts).
+      // Missing Summary / OpenRouter JSON failures / timeouts → regenerate (up to maxAttempts).
       if (!isRegenerableResumeError(err) || attempt >= maxAttempts) {
         throw lastError;
       }

@@ -90,7 +90,8 @@ async function extractJobDataOnce(
   const message = buildExtractionMessage(extractionPrompt, rawJobText);
   const { key } = pickRandomApiKey(keys);
   const raw = await completeChat(key, message, getExtractionModel(), {
-    maxRetries: 1,
+    maxRetries: 3,
+    keys,
     signal,
   });
 
@@ -110,7 +111,7 @@ async function extractJobDataOnce(
       key,
       buildResumeTypeFallbackMessage(rawJobText, raw),
       getExtractionModel(),
-      { maxRetries: 1, signal }
+      { maxRetries: 3, keys, signal }
     );
     const fallbackResumeType = parseResumeTypeDigit(fallbackRaw);
     if (!fallbackResumeType) {
@@ -160,14 +161,19 @@ export async function extractJobData(
   try {
     return await runAttempt();
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     const timedOut =
       err instanceof ExtractionTimeoutError ||
-      (err instanceof Error && /timed out|aborted|exceeded \d+s/i.test(err.message));
-    if (!timedOut) throw err;
+      /timed out|aborted|exceeded \d+s/i.test(msg);
+    const retryableJson =
+      /invalid json|Unexpected end of JSON|JSON input|empty content|429|502|503|504|rate limit|overloaded|fetch failed|network/i.test(
+        msg
+      );
+    if (!timedOut && !retryableJson) throw err;
     options?.onRetry?.(
-      err instanceof Error ? err.message : "extraction timed out"
+      err instanceof Error ? err.message : "extraction failed"
     );
-    // Retry once with the same raw JD after a hung/slow first extraction.
+    // Retry once with the same raw JD after a hung/slow or transient OpenRouter failure.
     return runAttempt();
   }
 }
