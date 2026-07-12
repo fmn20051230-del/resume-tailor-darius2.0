@@ -1,6 +1,6 @@
 /**
  * Converts a generated DOCX resume to PDF (same layout as the Word file).
- * Uses Microsoft Word COM on Windows when available, otherwise LibreOffice.
+ * Order: Microsoft Word COM (Windows) → LibreOffice (local) → ConvertAPI (serverless).
  * Does not regenerate layout from markdown.
  */
 import { execFile } from "child_process";
@@ -10,6 +10,10 @@ import path from "path";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
+
+function isServerless(): boolean {
+  return Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+}
 
 async function convertWithWord(docxBuffer: Buffer): Promise<Buffer | null> {
   if (process.platform !== "win32") return null;
@@ -58,6 +62,9 @@ try {
 }
 
 async function convertWithLibreOffice(docxBuffer: Buffer): Promise<Buffer | null> {
+  // LibreOffice binary is not available on Vercel; the package is stubbed there.
+  if (isServerless()) return null;
+
   try {
     const libre = await import("libreoffice-convert");
     const pdf = await new Promise<Buffer>((resolve, reject) => {
@@ -79,14 +86,86 @@ async function convertWithLibreOffice(docxBuffer: Buffer): Promise<Buffer | null
     return pdf?.length ? pdf : null;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (!/Could not find soffice|timed out/i.test(msg)) {
+    if (!/Could not find soffice|timed out|Cannot find package/i.test(msg)) {
       console.warn("[pdf] LibreOffice DOCX→PDF failed:", msg);
     }
     return null;
   }
 }
 
-/** Convert DOCX bytes to PDF bytes. Returns null if Word/LibreOffice unavailable. */
+/**
+ * ConvertAPI keeps Word layout fidelity on serverless hosts where Word/LibreOffice
+ * are unavailable. Set CONVERTAPI_SECRET in Vercel env vars.
+ * https://www.convertapi.com/docx-to-pdf
+ */
+async function convertWithConvertApi(docxBuffer: Buffer): Promise<Buffer | null> {
+  const secret = process.env.CONVERTAPI_SECRET?.trim();
+  if (!secret) return null;
+
+  try {
+    const res = await fetch(
+      `https://v2.convertapi.com/convert/docx/to/pdf?Secret=${encodeURIComponent(secret)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          Parameters: [
+            {
+              Name: "File",
+              FileValue: {
+                Name: "resume.docx",
+                Data: docxBuffer.toString("base64"),
+              },
+            },
+          ],
+        }),
+        signal: AbortSignal.timeout(90_000),
+      }
+    );
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.warn(
+        "[pdf] ConvertAPI DOCX→PDF failed:",
+        res.status,
+        body.slice(0, 300)
+      );
+      return null;
+    }
+
+    const json = (await res.json()) as {
+      Files?: Array<{ FileData?: string; Url?: string }>;
+    };
+    const file = json.Files?.[0];
+    if (file?.FileData) {
+      const pdf = Buffer.from(file.FileData, "base64");
+      return pdf.length ? pdf : null;
+    }
+
+    // Some responses return a download URL instead of inline base64.
+    if (file?.Url) {
+      const fileRes = await fetch(file.Url, { signal: AbortSignal.timeout(60_000) });
+      if (!fileRes.ok) {
+        console.warn("[pdf] ConvertAPI download failed:", fileRes.status);
+        return null;
+      }
+      const ab = await fileRes.arrayBuffer();
+      const pdf = Buffer.from(ab);
+      return pdf.length ? pdf : null;
+    }
+
+    console.warn("[pdf] ConvertAPI response missing file data");
+    return null;
+  } catch (err) {
+    console.warn(
+      "[pdf] ConvertAPI DOCX→PDF failed:",
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
+}
+
+/** Convert DOCX bytes to PDF bytes. Returns null if no converter is available. */
 export async function convertDocxToPdf(docxBuffer: Buffer): Promise<Buffer | null> {
   if (!docxBuffer?.length) return null;
 
@@ -96,8 +175,11 @@ export async function convertDocxToPdf(docxBuffer: Buffer): Promise<Buffer | nul
   const fromLibre = await convertWithLibreOffice(docxBuffer);
   if (fromLibre?.length) return fromLibre;
 
+  const fromConvertApi = await convertWithConvertApi(docxBuffer);
+  if (fromConvertApi?.length) return fromConvertApi;
+
   console.warn(
-    "[pdf] Could not convert DOCX→PDF. Install Microsoft Word or LibreOffice."
+    "[pdf] Could not convert DOCX→PDF. Locally: install Microsoft Word or LibreOffice. On Vercel: set CONVERTAPI_SECRET."
   );
   return null;
 }

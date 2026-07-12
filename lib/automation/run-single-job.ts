@@ -166,7 +166,7 @@ async function saveAndComplete(args: {
     "folder_created",
     hasPdf
       ? "Folder created (DOCX + PDF)"
-      : "Folder created (DOCX only — install Word or LibreOffice for PDF)",
+      : "Folder created (DOCX only — Word/LibreOffice locally, or CONVERTAPI_SECRET on Vercel)",
     Date.now() - pdfStarted
   );
 
