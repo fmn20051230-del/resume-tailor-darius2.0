@@ -1,6 +1,6 @@
 import type { AutomationProgressEvent, AutomationRunConfig, PipelineStepId } from "./types";
 import { scrapeJobPage } from "./scraper";
-import { extractJobData } from "./extractor";
+import { extractJobData, EXTRACTION_ATTEMPT_TIMEOUT_MS } from "./extractor";
 import { buildTailorJobDescription } from "./parse-extraction";
 import { resumeTypeToSlotIndex, slotLabel } from "./slot-router";
 import { buildFolderName, saveJobArtifacts } from "./folder-output";
@@ -170,18 +170,18 @@ export async function runSingleAutomationJob(
     let extracted;
     try {
       const extractStarted = Date.now();
-      emitStep("jd_extracted", "Extracting JD (30s limit, retry on timeout)…");
+      emitStep("jd_extracted", "Extracting JD (2m limit, retry on timeout)…");
       extracted = await extractJobData(
         config.extractionPrompt,
         rawText,
         config.apiKey,
         url,
         {
-          attemptTimeoutMs: 30_000,
+          attemptTimeoutMs: EXTRACTION_ATTEMPT_TIMEOUT_MS,
           onRetry: (reason) => {
             emitStep(
               "jd_extracted",
-              `No extracted JD within 30s — retrying with raw JD… (${reason})`
+              `No extracted JD within 2m — retrying with raw JD… (${reason})`
             );
           },
         }

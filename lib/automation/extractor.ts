@@ -8,7 +8,7 @@ import { parseExtractionResponse } from "./parse-extraction";
 import type { ExtractedJobData } from "./types";
 
 /** Per-attempt wall clock for LLM extraction; timeout → one retry with the same raw JD. */
-export const EXTRACTION_ATTEMPT_TIMEOUT_MS = 30_000;
+export const EXTRACTION_ATTEMPT_TIMEOUT_MS = 2 * 60 * 1000;
 
 export function buildExtractionMessage(
   extractionPrompt: string,
@@ -125,7 +125,7 @@ async function extractJobDataOnce(
 }
 
 export type ExtractJobDataOptions = {
-  /** Per-attempt timeout (default 30s). */
+  /** Per-attempt timeout (default 2 minutes). */
   attemptTimeoutMs?: number;
   /** Called before the retry that re-sends the same raw JD. */
   onRetry?: (reason: string) => void;
@@ -151,7 +151,7 @@ export async function extractJobData(
           signal
         );
       } catch (err) {
-        // Abort from the 30s timer often surfaces as a generic OpenAI/abort error.
+        // Abort from the attempt timer often surfaces as a generic OpenAI/abort error.
         if (signal.aborted) throw new ExtractionTimeoutError(attemptTimeoutMs);
         throw err;
       }
