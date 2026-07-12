@@ -170,12 +170,20 @@ export async function runSingleAutomationJob(
     let extracted;
     try {
       const extractStarted = Date.now();
-      extracted = await withTimeoutRetry(
-        "JD extraction",
-        () =>
-          extractJobData(config.extractionPrompt, rawText, config.apiKey, url),
-        (msg) => {
-          emitStep("jd_extracted", `Extraction timed out — regenerating… ${msg}`);
+      emitStep("jd_extracted", "Extracting JD (30s limit, retry on timeout)…");
+      extracted = await extractJobData(
+        config.extractionPrompt,
+        rawText,
+        config.apiKey,
+        url,
+        {
+          attemptTimeoutMs: 30_000,
+          onRetry: (reason) => {
+            emitStep(
+              "jd_extracted",
+              `No extracted JD within 30s — retrying with raw JD… (${reason})`
+            );
+          },
         }
       );
       emit({ type: "job_extracted_jd", index, extractedJd: extracted.raw });
