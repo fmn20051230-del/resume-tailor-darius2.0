@@ -21,7 +21,7 @@ export const DEFAULT_SETTINGS: AutomationSettings = {
   tailoringPrompt: "",
   baseResumes: ["", "", "", ""],
   outputDir: "output",
-  extractionModel: "deepseek/deepseek-v4-flash",
+  extractionModel: "qwen/qwen3.5-flash-02-23",
   temperature: 0.3,
   autoCreateFolder: true,
 };

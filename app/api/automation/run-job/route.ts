@@ -10,8 +10,8 @@ import { runSingleAutomationJob } from "@/lib/automation/run-single-job";
 import { RESUME_ATTEMPT_TIMEOUT_MS, MAX_RESUME_GENERATE_ATTEMPTS } from "@/lib/tailor-resume";
 
 export const dynamic = "force-dynamic";
-/** One job per invocation — enables localhost-like parallelism on Vercel. */
-export const maxDuration = 300;
+/** One job per invocation — 6 min generate attempts need headroom beyond Hobby 300s. */
+export const maxDuration = 800;
 
 type RunJobBody = {
   url?: string;
@@ -77,10 +77,9 @@ export async function POST(request: NextRequest) {
   ];
 
   const onVercel = Boolean(process.env.VERCEL);
-  // Each job gets its own ~300s budget on Vercel. 90s was too short (LLM often needs
-  // 1.5–3 min) and caused false failures around the 3-minute mark. Leave ~45s for
-  // scrape/extract/save; give generate ~2.5 min × 2 attempts (validation retries).
-  const attemptTimeoutMs = onVercel ? 150_000 : RESUME_ATTEMPT_TIMEOUT_MS;
+  // Deployed: 6 min per generate attempt (same spirit as localhost 7 min).
+  // Local: 7 min × 3 attempts.
+  const attemptTimeoutMs = onVercel ? 6 * 60 * 1000 : RESUME_ATTEMPT_TIMEOUT_MS;
   const maxAttempts = onVercel ? 2 : MAX_RESUME_GENERATE_ATTEMPTS;
 
   const encoder = new TextEncoder();

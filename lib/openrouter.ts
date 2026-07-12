@@ -31,13 +31,15 @@ export function createOpenRouterClient(apiKey: string): OpenAI {
 }
 
 export const DEFAULT_TAILOR_MODEL = "deepseek/deepseek-v4-flash";
+/** OpenRouter slug for Qwen3.5-Flash — used for JD extraction from raw page text. */
+export const DEFAULT_EXTRACTION_MODEL = "qwen/qwen3.5-flash-02-23";
 
 export function getTailorModel(): string {
   return process.env.TAILOR_MODEL?.trim() || DEFAULT_TAILOR_MODEL;
 }
 
 export function getExtractionModel(): string {
-  return process.env.EXTRACTION_MODEL?.trim() || getTailorModel();
+  return process.env.EXTRACTION_MODEL?.trim() || DEFAULT_EXTRACTION_MODEL;
 }
 
 export async function completeChat(
