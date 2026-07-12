@@ -255,6 +255,28 @@ export async function runResumeGenerateContinuation(
     `Resume generating attempt ${generateAttempt}/${maxAttempts} (${formatDuration(attemptTimeoutMs)} limit)`
   );
 
+  emit({
+    type: "job_generate_ready",
+    index,
+    url,
+    nextAttempt: generateAttempt,
+    maxAttempts,
+    elapsedMs: jobElapsed(),
+    tailoringPrompt: config.tailoringPrompt,
+    baseResume: config.baseResume,
+    slotIndex,
+    tailorJd: config.tailorJd,
+    rawJd: config.rawJd,
+    extractedJd: config.extractedJd,
+    companyName: config.companyName,
+    positionName: config.positionName,
+    resumeType: config.resumeType,
+    folderName,
+    outputDir: config.outputDir,
+    resumeNamePrefix: config.resumeNamePrefix,
+    apiKey: config.apiKey,
+  });
+
   try {
     const tailorStarted = Date.now();
     const tailored = await tailorResume({
@@ -509,6 +531,29 @@ export async function runSingleAutomationJob(
     // On Vercel, share one 4.5 min budget across those attempts (validation fails are fast).
     // Full timeouts that burn the budget still emit job_need_regenerate for a fresh call.
     const inProcessAttempts = maxAttempts;
+
+    // Let the client resume generate if this SSE dies mid-flight (common on Vercel).
+    emit({
+      type: "job_generate_ready",
+      index,
+      url,
+      nextAttempt: generateAttempt,
+      maxAttempts,
+      elapsedMs: jobElapsed(),
+      tailoringPrompt: config.tailoringPrompt,
+      baseResume,
+      slotIndex,
+      tailorJd,
+      rawJd: rawText,
+      extractedJd: extracted.raw,
+      companyName: extracted.companyName,
+      positionName: extracted.positionName,
+      resumeType: extracted.resumeType,
+      folderName,
+      outputDir: config.outputDir,
+      resumeNamePrefix: config.resumeNamePrefix,
+      apiKey: config.apiKey,
+    });
 
     let docxBuffer: Buffer;
     let resumeMarkdown: string;

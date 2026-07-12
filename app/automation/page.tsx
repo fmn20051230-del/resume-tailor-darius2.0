@@ -2,7 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { parseJobUrls } from "@/lib/automation/parse-urls";
-import type { AutomationProgressEvent, JobNeedRegenerateEvent } from "@/lib/automation/types";
+import type {
+  AutomationProgressEvent,
+  JobGenerateReadyEvent,
+  JobNeedRegenerateEvent,
+} from "@/lib/automation/types";
 import {
   loadSettings,
   mergeServerConfig,
@@ -155,6 +159,7 @@ export default function AutomationDashboard() {
 
   const stopRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  const jobsRef = useRef<JobRow[]>([]);
   /** Full per-job files for browser ZIP fallback (Vercel). */
   const batchFilesRef = useRef<
     {
@@ -164,15 +169,24 @@ export default function AutomationDashboard() {
   >([]);
 
   useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
+
+  const hasActiveJobs = jobs.some(
+    (j) => j.status === "processing" || j.status === "waiting"
+  );
+  const timerActive = running || hasActiveJobs;
+
+  useEffect(() => {
     if (!batchStartedAt) return;
-    if (!running && batchElapsedMs > 0) return;
+    if (!timerActive && batchElapsedMs > 0) return;
     const id = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [running, batchStartedAt, batchElapsedMs]);
+  }, [timerActive, batchStartedAt, batchElapsedMs]);
 
   const liveBatchElapsed = !batchStartedAt
     ? 0
-    : !running && batchElapsedMs > 0
+    : !timerActive && batchElapsedMs > 0
       ? batchElapsedMs
       : Math.max(0, nowTick - batchStartedAt);
 
@@ -206,8 +220,8 @@ export default function AutomationDashboard() {
       : 0;
 
   const updateJob = useCallback((index: number, patch: Partial<JobRow>) => {
-    setJobs((prev) =>
-      prev.map((j) => {
+    setJobs((prev) => {
+      const next = prev.map((j) => {
         if (j.index !== index) return j;
         const resetting =
           patch.status === "processing" &&
@@ -228,8 +242,10 @@ export default function AutomationDashboard() {
               : j.stepTimings,
           updatedAt: Date.now(),
         };
-      })
-    );
+      });
+      jobsRef.current = next;
+      return next;
+    });
   }, []);
 
   const handleEvent = useCallback(
@@ -361,6 +377,17 @@ export default function AutomationDashboard() {
           statusLabel: `Resume regenerating (${event.nextAttempt}/${event.maxAttempts})…`,
           error: event.error,
           elapsedMs: event.elapsedMs,
+        });
+        return;
+      }
+      if (event.type === "job_generate_ready") {
+        updateJob(event.index, {
+          status: "processing",
+          statusLabel: `Resume generating (attempt ${event.nextAttempt}/${event.maxAttempts})…`,
+          company: event.companyName,
+          position: event.positionName,
+          folderName: event.folderName,
+          resumeType: event.resumeType,
         });
         return;
       }
@@ -594,6 +621,7 @@ export default function AutomationDashboard() {
       res: Response
     ): Promise<{
       pendingRegen: JobNeedRegenerateEvent | null;
+      generateReady: JobGenerateReadyEvent | null;
       completedOrFailed: boolean;
     }> => {
       const reader = res.body?.getReader();
@@ -601,6 +629,7 @@ export default function AutomationDashboard() {
       const decoder = new TextDecoder();
       let buffer = "";
       let pendingRegen: JobNeedRegenerateEvent | null = null;
+      let generateReady: JobGenerateReadyEvent | null = null;
       let completedOrFailed = false;
 
       const consumeLine = (line: string) => {
@@ -618,13 +647,21 @@ export default function AutomationDashboard() {
           setNowTick(event.at || Date.now());
           return;
         }
+        if (event.type === "job_generate_ready") {
+          generateReady = event;
+          pendingRegen = null;
+          handleEvent(event);
+          return;
+        }
         if (event.type === "job_need_regenerate") {
           pendingRegen = event;
+          generateReady = null;
           handleEvent(event);
           return;
         }
         if (event.type === "job_complete") {
           pendingRegen = null;
+          generateReady = null;
           completedOrFailed = true;
           folderPaths.push(event.folderPath);
           handleEvent(event);
@@ -632,6 +669,7 @@ export default function AutomationDashboard() {
         }
         if (event.type === "job_failed" || event.type === "job_skipped") {
           pendingRegen = null;
+          generateReady = null;
           completedOrFailed = true;
           handleEvent(event);
           return;
@@ -654,10 +692,12 @@ export default function AutomationDashboard() {
         if (done || stopRef.current) break;
       }
 
-      return { pendingRegen, completedOrFailed };
+      return { pendingRegen, generateReady, completedOrFailed };
     };
 
-    const runGenerateAttempt = async (regen: JobNeedRegenerateEvent) => {
+    const runGenerateAttempt = async (
+      regen: JobNeedRegenerateEvent | JobGenerateReadyEvent
+    ) => {
       const res = await fetch("/api/automation/generate-attempt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -680,7 +720,7 @@ export default function AutomationDashboard() {
           outputDir: regen.outputDir,
           resumeNamePrefix: regen.resumeNamePrefix,
           apiKey: regen.apiKey,
-          previousError: regen.error,
+          previousError: "error" in regen ? regen.error : undefined,
         }),
         signal: controller.signal,
       });
@@ -692,7 +732,11 @@ export default function AutomationDashboard() {
           url: regen.url,
           error: data.error ?? `Regenerate failed (${res.status})`,
         });
-        return null;
+        return {
+          pendingRegen: null as JobNeedRegenerateEvent | null,
+          generateReady: null as JobGenerateReadyEvent | null,
+          completedOrFailed: true,
+        };
       }
       return readJobStream(res);
     };
@@ -728,18 +772,39 @@ export default function AutomationDashboard() {
       }
 
       let result = await readJobStream(res);
-      // Timeout-only: continue on a fresh serverless call (missing Summary retries in-process).
-      while (!stopRef.current) {
-        const regen = result.pendingRegen;
-        if (!regen) break;
-        updateJob(regen.index, {
+
+      // Keep going until this job is terminal. If SSE drops mid-generate, continue
+      // via generate-attempt using the saved generateReady / need_regenerate context.
+      let continuePasses = 0;
+      while (!stopRef.current && !result.completedOrFailed && continuePasses < 3) {
+        const cont =
+          result.pendingRegen ??
+          (result.generateReady
+            ? {
+                ...result.generateReady,
+                type: "job_need_regenerate" as const,
+                error:
+                  result.generateReady.error ??
+                  "Connection closed during resume generate — continuing…",
+              }
+            : null);
+        if (!cont) break;
+        continuePasses += 1;
+
+        updateJob(cont.index, {
           status: "processing",
-          statusLabel: `Starting resume attempt ${regen.nextAttempt}/${regen.maxAttempts}…`,
+          statusLabel: `Resume generating attempt ${cont.nextAttempt}/${cont.maxAttempts}…`,
         });
-        result = (await runGenerateAttempt(regen)) ?? {
-          pendingRegen: null,
-          completedOrFailed: true,
-        };
+        result = await runGenerateAttempt(cont);
+      }
+
+      if (!result.completedOrFailed && !stopRef.current) {
+        handleEvent({
+          type: "job_failed",
+          index,
+          url,
+          error: "Job ended before resume finished (connection closed during generate).",
+        });
       }
     };
 
@@ -775,6 +840,22 @@ export default function AutomationDashboard() {
 
       await Promise.all(workers);
 
+      // Yield so React state from the last job_failed/complete is reflected in jobsRef.
+      await new Promise((r) => setTimeout(r, 0));
+
+      for (const j of jobsRef.current) {
+        if (j.status === "processing" || j.status === "waiting") {
+          handleEvent({
+            type: "job_failed",
+            index: j.index,
+            url: j.url,
+            error: "Batch finished before this job completed.",
+          });
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, 0));
+
       const elapsed = Date.now() - startedAt;
       setBatchElapsedMs(elapsed);
       setBatchFolderPaths([...folderPaths]);
@@ -789,7 +870,14 @@ export default function AutomationDashboard() {
         return prev;
       });
 
-      if ((folderPaths.length > 0 || batchFilesRef.current.length > 0) && !stopRef.current) {
+      const stillActive = jobsRef.current.some(
+        (j) => j.status === "processing" || j.status === "waiting"
+      );
+      if (
+        !stillActive &&
+        (folderPaths.length > 0 || batchFilesRef.current.length > 0) &&
+        !stopRef.current
+      ) {
         await downloadZip(resumeNamePrefix.trim(), folderPaths);
       }
     } catch (err) {

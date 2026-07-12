@@ -40,12 +40,10 @@ export type AutomationJob = {
   steps: Partial<Record<PipelineStepId, string>>;
 };
 
-export type JobNeedRegenerateEvent = {
-  type: "job_need_regenerate";
+export type JobGenerateContextFields = {
   index: number;
   url: string;
-  error: string;
-  /** Next attempt number to run (2 or 3). */
+  /** Attempt number that should run next (1–3). */
   nextAttempt: number;
   maxAttempts: number;
   elapsedMs?: number;
@@ -62,6 +60,17 @@ export type JobNeedRegenerateEvent = {
   outputDir: string;
   resumeNamePrefix: string;
   apiKey?: string;
+  error?: string;
+};
+
+/** Emitted right before generate so the client can continue if the SSE drops mid-generate. */
+export type JobGenerateReadyEvent = JobGenerateContextFields & {
+  type: "job_generate_ready";
+};
+
+export type JobNeedRegenerateEvent = JobGenerateContextFields & {
+  type: "job_need_regenerate";
+  error: string;
 };
 
 export type AutomationProgressEvent =
@@ -110,6 +119,7 @@ export type AutomationProgressEvent =
     }
   | { type: "job_failed"; index: number; url: string; error: string; elapsedMs?: number }
   | { type: "job_skipped"; index: number; url: string; error: string; elapsedMs?: number }
+  | JobGenerateReadyEvent
   | JobNeedRegenerateEvent
   | { type: "heartbeat"; at: number }
   | {
