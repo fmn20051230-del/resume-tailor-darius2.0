@@ -86,6 +86,7 @@ export type AutomationProgressEvent =
     }
   | { type: "job_failed"; index: number; url: string; error: string; elapsedMs?: number }
   | { type: "job_skipped"; index: number; url: string; error: string; elapsedMs?: number }
+  | { type: "heartbeat"; at: number }
   | {
       type: "batch_complete";
       completed: number;

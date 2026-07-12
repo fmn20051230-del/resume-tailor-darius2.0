@@ -19,6 +19,8 @@ export type ProgressEmitter = (event: AutomationProgressEvent) => void;
 
 export type PipelineOptions = {
   shouldStop?: () => boolean;
+  /** Stop claiming new jobs after this timestamp (ms since epoch). */
+  deadlineAt?: number;
 };
 
 /** Default matches prior app: several resumes at once on one OpenRouter key. */
@@ -26,6 +28,11 @@ export const DEFAULT_CONCURRENCY = 4;
 export const MAX_CONCURRENCY = 10;
 /** Per-step wall-clock limit for scrape / extract / PDF (not resume — resume uses 7m × 3). */
 export const STEP_TIMEOUT_MS = 5 * 60 * 1000;
+/** Leave headroom before Vercel maxDuration (300s) so we can emit failures + ZIP. */
+export const VERCEL_SOFT_DEADLINE_MS = 240_000;
+/** Shorter tailor budget on Vercel so at least a few jobs finish inside maxDuration. */
+export const VERCEL_RESUME_ATTEMPT_TIMEOUT_MS = 90_000;
+export const VERCEL_RESUME_MAX_ATTEMPTS = 2;
 
 function clampConcurrency(value: number | undefined): number {
   if (!Number.isFinite(value)) return DEFAULT_CONCURRENCY;
@@ -92,13 +99,14 @@ async function mapPool(
   total: number,
   concurrency: number,
   worker: (index: number) => Promise<void>,
-  shouldStop?: () => boolean
+  options?: { shouldStop?: () => boolean; canClaim?: () => boolean }
 ): Promise<void> {
   let next = 0;
 
   async function runWorker() {
     while (true) {
-      if (shouldStop?.()) return;
+      if (options?.shouldStop?.()) return;
+      if (options?.canClaim && !options.canClaim()) return;
       const i = next++;
       if (i >= total) return;
       await worker(i);
@@ -120,9 +128,14 @@ export async function runAutomationPipeline(
   let skipped = 0;
   const completedFolderPaths: string[] = [];
   const zipEntries: ZipFolderEntry[] = [];
-  const concurrency = clampConcurrency(config.concurrency);
+  const finishedIndexes = new Set<number>();
+  const onVercel = Boolean(process.env.VERCEL);
+  const concurrency = onVercel ? 1 : clampConcurrency(config.concurrency);
   const withPdfLock = createPdfLock();
   const batchStartedAt = Date.now();
+  const deadlineAt =
+    options?.deadlineAt ??
+    (onVercel ? batchStartedAt + VERCEL_SOFT_DEADLINE_MS : undefined);
 
   emit({ type: "batch_start", total, startedAt: batchStartedAt });
   clearOutputDirectory(config.outputDir);
@@ -137,6 +150,7 @@ export async function runAutomationPipeline(
       const index = i + 1;
       const jobStartedAt = Date.now();
       const jobElapsed = () => Date.now() - jobStartedAt;
+      const markFinished = () => finishedIndexes.add(index);
 
       const emitStep = (
         step: PipelineStepId,
@@ -177,6 +191,7 @@ export async function runAutomationPipeline(
               elapsedMs: jobElapsed(),
             });
             skipped++;
+            markFinished();
             emitStep("moving_next", "Moving to next job...");
             return;
           }
@@ -184,11 +199,23 @@ export async function runAutomationPipeline(
           const msg = err instanceof Error ? err.message : "Failed to load URL";
           emit({ type: "job_skipped", index, url, error: msg, elapsedMs: jobElapsed() });
           skipped++;
+          markFinished();
           emitStep("moving_next", "Moving to next job...");
           return;
         }
 
-        if (options?.shouldStop?.()) return;
+        if (options?.shouldStop?.()) {
+          emit({
+            type: "job_failed",
+            index,
+            url,
+            error: "Batch stopped",
+            elapsedMs: jobElapsed(),
+          });
+          failed++;
+          markFinished();
+          return;
+        }
 
         let extracted;
         try {
@@ -218,6 +245,7 @@ export async function runAutomationPipeline(
               elapsedMs: jobElapsed(),
             });
             skipped++;
+            markFinished();
             emitStep("moving_next", "Moving to next job...");
             return;
           }
@@ -225,6 +253,7 @@ export async function runAutomationPipeline(
           const msg = err instanceof Error ? err.message : "Extraction failed";
           emit({ type: "job_failed", index, url, error: msg, elapsedMs: jobElapsed() });
           failed++;
+          markFinished();
           emitStep("moving_next", "Moving to next job...");
           return;
         }
@@ -255,23 +284,41 @@ export async function runAutomationPipeline(
           throw new Error(`Base resume for ${slotName} slot is empty.`);
         }
 
-        if (options?.shouldStop?.()) return;
+        if (options?.shouldStop?.()) {
+          emit({
+            type: "job_failed",
+            index,
+            url,
+            error: "Batch stopped",
+            elapsedMs: jobElapsed(),
+          });
+          failed++;
+          markFinished();
+          return;
+        }
 
         let docxBuffer: Buffer;
         let resumeMarkdown: string;
+        const resumeAttemptMs = onVercel
+          ? VERCEL_RESUME_ATTEMPT_TIMEOUT_MS
+          : RESUME_ATTEMPT_TIMEOUT_MS;
+        const resumeMaxAttempts = onVercel
+          ? VERCEL_RESUME_MAX_ATTEMPTS
+          : MAX_RESUME_GENERATE_ATTEMPTS;
         try {
           emitStep(
             "resume_generating",
-            `Resume generating (7 min limit, up to ${MAX_RESUME_GENERATE_ATTEMPTS} attempts)`
+            `Resume generating (${formatDuration(resumeAttemptMs)} limit, up to ${resumeMaxAttempts} attempts)`
           );
           const tailorStarted = Date.now();
-          // tailorResume owns 7m/attempt × 3 attempts (≤21m). Do not wrap again.
           const tailored = await tailorResume({
             slotIndex,
             baseResume,
             jobDescription: tailorJd,
             tailoringPrompt: config.tailoringPrompt,
             apiKey: config.apiKey,
+            attemptTimeoutMs: resumeAttemptMs,
+            maxAttempts: resumeMaxAttempts,
             onAttempt: (attempt, maxAttempts, previousError) => {
               if (attempt === 1) return;
               const reason = previousError
@@ -281,7 +328,7 @@ export async function runAutomationPipeline(
                 : "retrying";
               emitStep(
                 "resume_generating",
-                `Resume regenerating (${attempt}/${maxAttempts}, ${formatDuration(RESUME_ATTEMPT_TIMEOUT_MS)} limit) — ${reason}`
+                `Resume regenerating (${attempt}/${maxAttempts}, ${formatDuration(resumeAttemptMs)} limit) — ${reason}`
               );
             },
           });
@@ -300,6 +347,7 @@ export async function runAutomationPipeline(
           const msg = err instanceof Error ? err.message : "Resume generation failed";
           emit({ type: "job_failed", index, url, error: msg, elapsedMs: jobElapsed() });
           failed++;
+          markFinished();
           emitStep("moving_next", "Moving to next job...");
           return;
         }
@@ -371,16 +419,43 @@ export async function runAutomationPipeline(
           },
         });
         completed++;
+        markFinished();
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unexpected error";
         emit({ type: "job_failed", index, url, error: msg, elapsedMs: jobElapsed() });
         failed++;
+        markFinished();
       }
 
       emitStep("moving_next", "Moving to next job...");
     },
-    options?.shouldStop
+    {
+      shouldStop: options?.shouldStop,
+      canClaim: () => {
+        if (options?.shouldStop?.()) return false;
+        if (deadlineAt != null && Date.now() >= deadlineAt) return false;
+        return true;
+      },
+    }
   );
+
+  // Jobs never started (Vercel soft deadline) — fail explicitly so the UI does not hang.
+  for (let i = 0; i < total; i++) {
+    const index = i + 1;
+    if (finishedIndexes.has(index)) continue;
+    const url = config.urls[i];
+    emit({
+      type: "job_failed",
+      index,
+      url,
+      error: onVercel
+        ? "Skipped: Vercel function time limit (~4 min soft / 5 min hard). Run remaining URLs on localhost or in smaller batches of 2–3."
+        : "Skipped: batch ended before this job started",
+      elapsedMs: 0,
+    });
+    failed++;
+    finishedIndexes.add(index);
+  }
 
   let zipBase64: string | undefined;
   let zipFileName: string | undefined;

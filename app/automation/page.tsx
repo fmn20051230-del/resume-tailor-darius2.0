@@ -164,13 +164,18 @@ export default function AutomationDashboard() {
   >([]);
 
   useEffect(() => {
-    if (!running && !batchStartedAt) return;
+    if (!batchStartedAt) return;
+    // Keep ticking while running, or until we freeze elapsed on batch_complete.
+    if (!running && batchElapsedMs > 0) return;
     const id = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [running, batchStartedAt]);
+  }, [running, batchStartedAt, batchElapsedMs]);
 
-  const liveBatchElapsed =
-    running && batchStartedAt ? nowTick - batchStartedAt : batchElapsedMs;
+  const liveBatchElapsed = !batchStartedAt
+    ? 0
+    : !running && batchElapsedMs > 0
+      ? batchElapsedMs
+      : Math.max(0, nowTick - batchStartedAt);
 
   useEffect(() => {
     const saved = loadSettings();
@@ -233,6 +238,11 @@ export default function AutomationDashboard() {
       if (event.type === "batch_start") {
         setBatchStartedAt(Date.now());
         setBatchElapsedMs(0);
+        setNowTick(Date.now());
+        return;
+      }
+      if (event.type === "heartbeat") {
+        setNowTick(event.at || Date.now());
         return;
       }
       if (event.type === "job_start") {
@@ -575,6 +585,29 @@ export default function AutomationDashboard() {
     let batchCompleted = 0;
     let batchFolders: string[] = [];
     let inlineZip: { base64: string; fileName: string } | undefined;
+    let sawBatchComplete = false;
+    const startedAt = Date.now();
+
+    const failIncompleteJobs = (reason: string) => {
+      setJobs((prev) =>
+        prev.map((j) => {
+          if (
+            j.status === "completed" ||
+            j.status === "failed" ||
+            j.status === "skipped"
+          ) {
+            return j;
+          }
+          return {
+            ...j,
+            status: "failed",
+            statusLabel: "Interrupted",
+            error: reason,
+            updatedAt: Date.now(),
+          };
+        })
+      );
+    };
 
     try {
       const res = await fetch("/api/automation/run", {
@@ -588,7 +621,12 @@ export default function AutomationDashboard() {
           outputDir: settings.outputDir,
           resumeNamePrefix: resumeNamePrefix.trim(),
           apiKey: settings.apiKey.trim() || undefined,
-          concurrency,
+          concurrency:
+            typeof window !== "undefined" &&
+            window.location.hostname !== "localhost" &&
+            window.location.hostname !== "127.0.0.1"
+              ? 1
+              : concurrency,
         }),
         signal: controller.signal,
       });
@@ -619,6 +657,7 @@ export default function AutomationDashboard() {
           const event = JSON.parse(json) as AutomationProgressEvent | { type: "error"; message?: string };
           if (event.type === "error") throw new Error(event.message ?? "Pipeline error");
           if (event.type === "batch_complete") {
+            sawBatchComplete = true;
             batchCompleted = event.completed;
             batchFolders = event.folderPaths;
             if (event.zipBase64) {
@@ -632,14 +671,38 @@ export default function AutomationDashboard() {
         }
       }
 
+      if (!sawBatchComplete && !stopRef.current) {
+        const reason =
+          "Connection ended before the batch finished (common on Vercel after ~5 minutes). Incomplete jobs were stopped — use localhost or run 2–3 URLs at a time.";
+        failIncompleteJobs(reason);
+        setError(reason);
+        setBatchElapsedMs(Date.now() - startedAt);
+      }
+
       if (batchCompleted > 0 && !stopRef.current) {
         await downloadZip(resumeNamePrefix.trim(), batchFolders, inlineZip);
       }
     } catch (err) {
       if (err instanceof Error && err.name !== "AbortError") {
         setError(err.message);
+        if (!sawBatchComplete) {
+          failIncompleteJobs(err.message);
+          setBatchElapsedMs(Date.now() - startedAt);
+        }
       }
     } finally {
+      setJobs((prev) => {
+        const c = prev.filter((j) => j.status === "completed").length;
+        const f = prev.filter((j) => j.status === "failed").length;
+        const s = prev.filter((j) => j.status === "skipped").length;
+        setCompleted(c);
+        setFailed(f);
+        setSkipped(s);
+        return prev;
+      });
+      if (!sawBatchComplete) {
+        setBatchElapsedMs((prev) => prev || Date.now() - startedAt);
+      }
       setRunning(false);
       abortRef.current = null;
     }
@@ -697,10 +760,11 @@ export default function AutomationDashboard() {
 
       {isProductionHost && (
         <div className="art-banner art-banner--warn" role="status">
-          <strong>Vercel limits batch automation.</strong> Localhost finishes in ~1–2 min/job
-          because Playwright + Word/LibreOffice are available. On Vercel there is no
-          headless browser and <strong>no PDF</strong> (DOCX + MD + JD + URL still download).
-          Prefer <code>npm run dev</code> for full batches with PDF.
+          <strong>Vercel hard-stops batches after ~5 minutes.</strong> Only a few
+          jobs can finish per run (no Playwright, concurrency forced to 1). Jobs
+          that cannot start are marked failed instead of spinning forever. For
+          10+ URLs use <code>npm run dev</code> on localhost, or run small batches
+          of 2–3 URLs on Vercel. PDF still requires local Word/LibreOffice.
         </div>
       )}
 

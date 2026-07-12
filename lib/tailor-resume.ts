@@ -27,6 +27,10 @@ export type TailorResumeInput = {
   jobDescription: string;
   tailoringPrompt: string;
   apiKey?: string;
+  /** Override per-attempt timeout (default 7 minutes). */
+  attemptTimeoutMs?: number;
+  /** Override max attempts (default 3). */
+  maxAttempts?: number;
   /** Called before each generate attempt (1-based). */
   onAttempt?: (attempt: number, maxAttempts: number, previousError?: string) => void;
 };
@@ -125,16 +129,25 @@ export async function tailorResume(input: TailorResumeInput): Promise<TailorResu
   const { key } = pickRandomApiKey(keys);
   let lastError: Error | null = null;
   const budgetStarted = Date.now();
+  const maxAttempts = Math.max(
+    1,
+    Math.min(MAX_RESUME_GENERATE_ATTEMPTS, input.maxAttempts ?? MAX_RESUME_GENERATE_ATTEMPTS)
+  );
+  const perAttemptMs = Math.max(
+    30_000,
+    input.attemptTimeoutMs ?? RESUME_ATTEMPT_TIMEOUT_MS
+  );
+  const totalBudgetMs = perAttemptMs * maxAttempts;
 
-  for (let attempt = 1; attempt <= MAX_RESUME_GENERATE_ATTEMPTS; attempt++) {
-    const budgetLeft = RESUME_TOTAL_BUDGET_MS - (Date.now() - budgetStarted);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const budgetLeft = totalBudgetMs - (Date.now() - budgetStarted);
     if (budgetLeft <= 0) {
-      throw lastError ?? new Error("Resume generation exceeded 21-minute total budget");
+      throw lastError ?? new Error("Resume generation exceeded total time budget");
     }
 
-    const attemptTimeoutMs = Math.min(RESUME_ATTEMPT_TIMEOUT_MS, budgetLeft);
+    const attemptTimeoutMs = Math.min(perAttemptMs, budgetLeft);
     const previousError = lastError?.message;
-    input.onAttempt?.(attempt, MAX_RESUME_GENERATE_ATTEMPTS, previousError);
+    input.onAttempt?.(attempt, maxAttempts, previousError);
 
     const message =
       attempt === 1 || !previousError
@@ -145,7 +158,7 @@ export async function tailorResume(input: TailorResumeInput): Promise<TailorResu
       const result = await runWithTimeout(
         attemptTimeoutMs,
         attempt,
-        MAX_RESUME_GENERATE_ATTEMPTS,
+        maxAttempts,
         async (signal) => {
           const content = await completeChat(key, message, getTailorModel(), {
             reasoning: true,
@@ -159,7 +172,7 @@ export async function tailorResume(input: TailorResumeInput): Promise<TailorResu
       return result;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      if (!isRegenerableResumeError(err) || attempt >= MAX_RESUME_GENERATE_ATTEMPTS) {
+      if (!isRegenerableResumeError(err) || attempt >= maxAttempts) {
         throw lastError;
       }
     }

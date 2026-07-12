@@ -4,6 +4,7 @@ import {
   DEFAULT_CONCURRENCY,
   MAX_CONCURRENCY,
   runAutomationPipeline,
+  VERCEL_SOFT_DEADLINE_MS,
 } from "@/lib/automation/pipeline";
 import type { AutomationRunConfig } from "@/lib/automation/types";
 import {
@@ -16,9 +17,8 @@ import { sanitizeResumeNamePrefix } from "@/lib/automation/folder-output";
 
 export const dynamic = "force-dynamic";
 /**
- * Vercel kills this SSE handler when maxDuration is hit.
- * Hobby max ≈ 300s; Pro can go higher. Local `next dev` has no such cap —
- * that is why batches finish in 1–2 min/job locally but stall/die on Vercel.
+ * Vercel kills this SSE handler when maxDuration is hit (Hobby ≤ 300s).
+ * Local `next dev` has no such cap.
  */
 export const maxDuration = 300;
 
@@ -34,6 +34,7 @@ type RunBody = {
 };
 
 function resolveConcurrency(value: unknown): number {
+  if (process.env.VERCEL) return 1;
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return DEFAULT_CONCURRENCY;
   return Math.max(1, Math.min(MAX_CONCURRENCY, Math.floor(n)));
@@ -105,21 +106,48 @@ export async function POST(request: NextRequest) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
+      let closed = false;
       const emit = (event: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        } catch {
+          closed = true;
+        }
       };
 
+      // Keep the SSE connection alive during long LLM waits (proxies drop silent streams).
+      const heartbeat = setInterval(() => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`: ping ${Date.now()}\n\n`));
+          emit({ type: "heartbeat", at: Date.now() });
+        } catch {
+          closed = true;
+        }
+      }, 10_000);
+
       try {
-        await runAutomationPipeline(config, emit);
+        await runAutomationPipeline(config, emit, {
+          deadlineAt: process.env.VERCEL
+            ? Date.now() + VERCEL_SOFT_DEADLINE_MS
+            : undefined,
+        });
       } catch (err) {
         emit({
           type: "error",
           message: err instanceof Error ? err.message : "Pipeline failed",
         });
       } finally {
+        clearInterval(heartbeat);
         const { closeBrowser } = await import("@/lib/automation/browser");
         await closeBrowser().catch(() => {});
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // already closed
+        }
+        closed = true;
       }
     },
   });
