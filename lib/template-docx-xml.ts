@@ -74,6 +74,98 @@ function textRun(text: string, rPr: string): string {
   return `<w:r>${rPr}<w:t${preserve}>${esc(text)}</w:t></w:r>`;
 }
 
+/** Keep paragraph with the next one so headings/job lines aren't stranded at page bottom. */
+const KEEP_TOGETHER = "<w:keepNext/><w:keepLines/>";
+
+function ensureParagraphKeepTogether(pXml: string): string {
+  if (/<w:keepNext\b/.test(pXml)) {
+    if (!/<w:keepLines\b/.test(pXml)) {
+      return pXml.replace(/<w:keepNext\s*\/>/, "<w:keepNext/><w:keepLines/>");
+    }
+    return pXml;
+  }
+  return pXml.replace(/<w:pPr>([\s\S]*?)<\/w:pPr>/, (_m, inner: string) => {
+    if (/<w:pStyle\b/.test(inner)) {
+      return `<w:pPr>${inner.replace(/(<w:pStyle\b[^/]*\/>)/, `$1${KEEP_TOGETHER}`)}</w:pPr>`;
+    }
+    return `<w:pPr>${KEEP_TOGETHER}${inner}</w:pPr>`;
+  });
+}
+
+/**
+ * If a heading (or job/company line) would land in the last ~4 lines of a page,
+ * Word moves it with the following content via keepNext chains.
+ */
+function applyOrphanHeadingControl(bodyXml: string): string {
+  const re = /<w:p\b[\s\S]*?<\/w:p>/g;
+  const paragraphs: { start: number; end: number; xml: string }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(bodyXml)) !== null) {
+    paragraphs.push({ start: m.index, end: m.index + m[0].length, xml: m[0] });
+  }
+  if (!paragraphs.length) return bodyXml;
+
+  const paragraphText = (p: string): string =>
+    [...p.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map((x) => x[1]).join("");
+
+  const isEmptyParagraph = (p: string): boolean => !paragraphText(p).trim();
+
+  const isSectionHeading = (p: string): boolean => {
+    const t = paragraphText(p).trim();
+    return (
+      /^Work Experience$/i.test(t) ||
+      /^Technologies and Languages$/i.test(t) ||
+      /^Education and Certifications$/i.test(t)
+    );
+  };
+
+  const isJobOrEducationLine = (p: string): boolean => {
+    if (isSectionHeading(p) || isEmptyParagraph(p)) return false;
+    if (/<w:numPr>/.test(p)) return false;
+    // Job line / education entry: bold text with tab(s).
+    return /<w:tab\s*\/>/.test(p) && /<w:b\s*\/>/.test(p);
+  };
+
+  const xmls = paragraphs.map((p) => p.xml);
+  const followLines = 3; // heading + 3 following ≈ last-four-lines guard
+
+  const keepFollowing = (start: number, stopAtJobLine: boolean) => {
+    let kept = 0;
+    for (let j = 1; start + j < xmls.length && kept < followLines; j++) {
+      const idx = start + j;
+      if (isSectionHeading(xmls[idx])) break;
+      if (stopAtJobLine && isJobOrEducationLine(xmls[idx])) break;
+      if (isEmptyParagraph(xmls[idx])) {
+        xmls[idx] = ensureParagraphKeepTogether(xmls[idx]);
+        continue;
+      }
+      xmls[idx] = ensureParagraphKeepTogether(xmls[idx]);
+      kept++;
+    }
+  };
+
+  for (let i = 0; i < xmls.length; i++) {
+    if (isSectionHeading(xmls[i])) {
+      xmls[i] = ensureParagraphKeepTogether(xmls[i]);
+      keepFollowing(i, false);
+      continue;
+    }
+    if (isJobOrEducationLine(xmls[i])) {
+      xmls[i] = ensureParagraphKeepTogether(xmls[i]);
+      keepFollowing(i, true);
+    }
+  }
+
+  let out = "";
+  let cursor = 0;
+  for (let i = 0; i < paragraphs.length; i++) {
+    out += bodyXml.slice(cursor, paragraphs[i].start);
+    out += xmls[i];
+    cursor = paragraphs[i].end;
+  }
+  return out + bodyXml.slice(cursor);
+}
+
 function noBreak(text: string): string {
   return text.replace(/ /g, "\u00A0");
 }
@@ -265,7 +357,7 @@ export function buildDocumentBodyXml(
     });
   }
 
-  return parts.join("");
+  return applyOrphanHeadingControl(parts.join(""));
 }
 
 /** @deprecated Use buildHyperlinkRels */
