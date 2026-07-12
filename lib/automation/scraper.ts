@@ -296,6 +296,15 @@ function discoverGreenhouseBoardFromHtml(html: string): string | null {
  * with ?gh_jid= or /jobs/{id} that proxy Greenhouse.
  */
 async function scrapeGreenhouse(parsed: URL): Promise<string | null> {
+  // Dedicated ATS hosts have their own scrapers — never treat /jobs/{id} as Greenhouse.
+  if (
+    /(?:^|\.)(?:recruiterflow\.com|ripplehire\.com|oraclecloud\.com|dayforcehcm\.com|ashbyhq\.com|applytojob\.com|jobs\.gem\.com|adp\.com|lever\.co|myworkdayjobs\.com|smartrecruiters\.com|recruitee\.com|eightfold\.ai|icims\.com)$/i.test(
+      parsed.hostname
+    )
+  ) {
+    return null;
+  }
+
   const isGreenhouseHost = /greenhouse\.io$/i.test(parsed.hostname);
   const jobId = extractGreenhouseJobId(parsed);
   if (!jobId) {
@@ -836,6 +845,256 @@ async function scrapeJazzHr(parsed: URL): Promise<string | null> {
         title ? `Job Title: ${title}` : "",
         company && !/career page/i.test(company) ? `Company: ${company}` : "",
         desc,
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    );
+    return text.length >= 80 ? truncate(text) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Ripplehire (*.ripplehire.com) — SPA; JD via candidatejobdetail?token=&jobSeq=
+async function scrapeRipplehire(parsed: URL): Promise<string | null> {
+  if (!/ripplehire\.com$/i.test(parsed.hostname)) return null;
+
+  const token =
+    parsed.searchParams.get("token")?.trim() ||
+    parsed.searchParams.get("ptoken")?.trim() ||
+    "";
+  const hash = parsed.hash || "";
+  const jobSeq =
+    parsed.searchParams.get("jobSeq")?.trim() ||
+    parsed.searchParams.get("jobId")?.trim() ||
+    parsed.searchParams.get("jobid")?.trim() ||
+    (hash.match(/detail\/job\/(\d+)/i)?.[1] ?? "") ||
+    (hash.match(/\/job\/(\d+)/i)?.[1] ?? "");
+  if (!token || !jobSeq) return null;
+
+  const origin = `${parsed.protocol}//${parsed.host}`;
+  const api = new URL("/candidate/candidatejobdetail", origin);
+  api.searchParams.set("token", token);
+  api.searchParams.set("jobSeq", jobSeq);
+  api.searchParams.set("lang", "en");
+
+  try {
+    const res = await fetchWithTimeout(api.toString(), {
+      headers: {
+        ...BROWSER_HEADERS,
+        Accept: "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        Referer: parsed.toString().split("#")[0],
+        Origin: origin,
+      },
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as {
+      companyVO?: { companyName?: string };
+      jobVO?: {
+        jobTitle?: string;
+        jobDesc?: string;
+        jobLocation?: string;
+        locations?: string;
+        jobCode?: string;
+        jobPrimarySkills?: string;
+        jobSecondarySkills?: string;
+        jobSkills?: string;
+        otherDetails?: string;
+        compensationInfo?: string;
+        compensationRange?: string;
+      };
+    };
+    const job = json.jobVO;
+    if (!job?.jobDesc && !job?.jobTitle) {
+      throw new Error(
+        "This Ripplehire posting was not found — it has likely expired or been removed."
+      );
+    }
+
+    const body = [
+      htmlToText(job.jobDesc ?? ""),
+      htmlToText(job.otherDetails ?? ""),
+      job.jobPrimarySkills ? `Primary Skills: ${htmlToText(job.jobPrimarySkills)}` : "",
+      job.jobSecondarySkills
+        ? `Secondary Skills: ${htmlToText(job.jobSecondarySkills)}`
+        : "",
+      job.jobSkills ? `Skills: ${htmlToText(job.jobSkills)}` : "",
+      job.compensationInfo || job.compensationRange
+        ? `Compensation: ${htmlToText(job.compensationInfo || job.compensationRange || "")}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    if (!body.trim()) return null;
+
+    const location = job.jobLocation || job.locations || "";
+    const text = collapseWhitespace(
+      [
+        job.jobTitle ? `Job Title: ${job.jobTitle}` : "",
+        json.companyVO?.companyName
+          ? `Company: ${json.companyVO.companyName}`
+          : "",
+        location ? `Location: ${location}` : "",
+        job.jobCode ? `Job Code: ${job.jobCode}` : "",
+        body,
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    );
+    return text.length >= 80 ? truncate(text) : null;
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      /Ripplehire posting was not found/i.test(err.message)
+    ) {
+      throw err;
+    }
+    return null;
+  }
+}
+
+// Recruiterflow (recruiterflow.com/{company}/jobs/{id}) — JSON-LD JobPosting in HTML.
+async function scrapeRecruiterflow(parsed: URL): Promise<string | null> {
+  if (!/recruiterflow\.com$/i.test(parsed.hostname)) return null;
+  if (!/\/jobs\/\d+/i.test(parsed.pathname)) return null;
+
+  try {
+    const res = await fetchWithTimeout(parsed.toString(), {
+      headers: { ...BROWSER_HEADERS, Accept: "text/html,*/*" },
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const fromLd = extractJsonLdJobPostingFromRaw(html);
+    if (fromLd) return fromLd;
+    return extractFromHtml(html);
+  } catch {
+    return null;
+  }
+}
+
+// Oracle Cloud HCM Candidate Experience (*.oraclecloud.com/.../job/{id})
+type OracleCeJobDetail = {
+  Title?: string;
+  PrimaryLocation?: string;
+  PrimaryLocationCountry?: string;
+  Organization?: string;
+  ExternalDescriptionStr?: string;
+  ExternalResponsibilitiesStr?: string;
+  ExternalQualificationsStr?: string;
+  ShortDescriptionStr?: string;
+  CorporateDescriptionStr?: string;
+  WorkplaceType?: string;
+  Category?: string;
+};
+
+async function scrapeOracleCloud(parsed: URL): Promise<string | null> {
+  if (!/oraclecloud\.com$/i.test(parsed.hostname)) return null;
+  const jobMatch = parsed.pathname.match(/\/job\/(\d+)/i);
+  if (!jobMatch?.[1]) return null;
+  const jobId = jobMatch[1];
+
+  try {
+    const pageRes = await fetchWithTimeout(parsed.toString(), {
+      headers: { ...BROWSER_HEADERS, Accept: "text/html,*/*" },
+    });
+    const pageHtml = pageRes.ok ? await pageRes.text() : "";
+
+    const siteFromHtml = [
+      ...pageHtml.matchAll(/siteNumber["'\s:=]+([A-Z0-9_]+)/gi),
+    ].map((m) => m[1]);
+    const siteFromPath = parsed.pathname.match(/\/sites\/([^/]+)/i)?.[1];
+    const siteCandidates = [
+      ...new Set(
+        [
+          ...siteFromHtml,
+          siteFromPath && /^CX_/i.test(siteFromPath) ? siteFromPath : "",
+          siteFromPath === "jobsearch" ? "CX_45001" : "",
+          siteFromPath || "",
+          "CX_45001",
+          "CX_1",
+        ].filter(Boolean)
+      ),
+    ];
+
+    let item: OracleCeJobDetail | null = null;
+
+    for (const site of siteCandidates) {
+      const api = new URL(
+        "/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails",
+        `${parsed.protocol}//${parsed.host}`
+      );
+      api.searchParams.set("expand", "all");
+      api.searchParams.set("onlyData", "true");
+      api.searchParams.set(
+        "finder",
+        `ById;Id="${jobId}",siteNumber=${site}`
+      );
+
+      const res = await fetchWithTimeout(api.toString(), {
+        headers: {
+          ...BROWSER_HEADERS,
+          Accept: "application/json, application/vnd.oracle.adf.resourceitem+json",
+          "ora-irc-language": "en",
+          "ora-irc-cx-userid":
+            typeof crypto !== "undefined" && "randomUUID" in crypto
+              ? crypto.randomUUID()
+              : `cx-${Date.now()}`,
+          Referer: parsed.toString(),
+          Origin: `${parsed.protocol}//${parsed.host}`,
+        },
+      });
+      if (!res.ok) continue;
+      const json = (await res.json()) as { items?: OracleCeJobDetail[] };
+      const candidate = json.items?.[0];
+      if (candidate?.Title || candidate?.ExternalDescriptionStr) {
+        item = candidate;
+        break;
+      }
+    }
+
+    if (!item) {
+      // Fallback: og:title / og:description from the public page (short).
+      const ogTitle = pageHtml.match(
+        /property=["']og:title["']\s+content=["']([^"']+)["']/i
+      )?.[1];
+      const ogDesc = pageHtml.match(
+        /property=["']og:description["']\s+content=["']([^"']+)["']/i
+      )?.[1];
+      if (ogTitle && ogDesc && ogDesc.length >= 80) {
+        return truncate(
+          collapseWhitespace(
+            `Job Title: ${ogTitle}\n\n${htmlToText(ogDesc)}`
+          )
+        );
+      }
+      return null;
+    }
+
+    const body = [
+      htmlToText(item.ExternalDescriptionStr ?? ""),
+      htmlToText(item.ExternalResponsibilitiesStr ?? ""),
+      htmlToText(item.ExternalQualificationsStr ?? ""),
+      !item.ExternalDescriptionStr
+        ? htmlToText(item.ShortDescriptionStr ?? "")
+        : "",
+      htmlToText(item.CorporateDescriptionStr ?? ""),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    if (!body.trim()) return null;
+
+    const location = [item.PrimaryLocation, item.PrimaryLocationCountry]
+      .filter(Boolean)
+      .join(", ");
+    const text = collapseWhitespace(
+      [
+        item.Title ? `Job Title: ${item.Title}` : "",
+        item.Organization ? `Organization: ${item.Organization}` : "",
+        location ? `Location: ${location}` : "",
+        item.WorkplaceType ? `Workplace: ${item.WorkplaceType}` : "",
+        item.Category ? `Category: ${item.Category}` : "",
+        body,
       ]
         .filter(Boolean)
         .join("\n\n")
@@ -1762,6 +2021,22 @@ export async function scrapeJobPage(url: string): Promise<string> {
 
   const jazzHr = await scrapeJazzHr(parsed);
   if (jazzHr) return jazzHr;
+
+  try {
+    const ripplehire = await scrapeRipplehire(parsed);
+    if (ripplehire) return ripplehire;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/Ripplehire posting was not found|expired or been removed/i.test(msg)) {
+      throw err;
+    }
+  }
+
+  const recruiterflow = await scrapeRecruiterflow(parsed);
+  if (recruiterflow) return recruiterflow;
+
+  const oracleCloud = await scrapeOracleCloud(parsed);
+  if (oracleCloud) return oracleCloud;
 
   const recruitee = await scrapeRecruitee(parsed);
   if (recruitee) return recruitee;
