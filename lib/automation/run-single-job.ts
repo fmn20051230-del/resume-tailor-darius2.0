@@ -139,20 +139,25 @@ async function saveAndComplete(args: {
   jobElapsed: () => number;
 }): Promise<"completed"> {
   const pdfStarted = Date.now();
-  const pdfBuffer = await pdfLock(() =>
-    withTimeout(STEP_TIMEOUT_MS, "PDF conversion", () =>
-      convertResumeToPdfBuffer({
-        docxBuffer: args.docxBuffer,
-        resumeMarkdown: args.resumeMarkdown,
-      })
-    )
-  ).catch((err) => {
-    console.error(
-      `[pdf] DOCX→PDF failed for job ${args.index} (${args.folderName}):`,
-      err instanceof Error ? err.message : err
-    );
-    return null;
-  });
+  args.emitStep("folder_created", "Converting DOCX → PDF…");
+
+  let pdfBuffer: Buffer | null = null;
+  for (let attempt = 1; attempt <= 3 && !pdfBuffer?.length; attempt++) {
+    pdfBuffer = await pdfLock(() =>
+      withTimeout(STEP_TIMEOUT_MS, "PDF conversion", () =>
+        convertResumeToPdfBuffer({ docxBuffer: args.docxBuffer })
+      )
+    ).catch((err) => {
+      console.error(
+        `[pdf] DOCX→PDF attempt ${attempt}/3 failed for job ${args.index} (${args.folderName}):`,
+        err instanceof Error ? err.message : err
+      );
+      return null;
+    });
+    if (!pdfBuffer?.length && attempt < 3) {
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
 
   const saved = await saveJobArtifacts({
     outputDir: args.outputDir,

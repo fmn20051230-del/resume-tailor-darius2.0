@@ -565,6 +565,59 @@ export default function AutomationDashboard() {
     return new Blob([concat([...parts, centralDir, end])], { type: "application/zip" });
   }
 
+  /**
+   * For every DOCX in the batch that is missing a PDF, convert DOCX→PDF via API
+   * (no OpenRouter). Sequential to avoid ConvertAPI rate limits.
+   */
+  async function ensurePdfsForBatchFiles(): Promise<void> {
+    const jobs = batchFilesRef.current;
+    for (const job of jobs) {
+      const docx = job.files.find((f) => /\.docx$/i.test(f.fileName));
+      const hasPdf = job.files.some((f) => /\.pdf$/i.test(f.fileName));
+      if (!docx?.base64 || hasPdf) continue;
+
+      try {
+        const res = await fetch("/api/automation/convert-pdf", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            docxBase64: docx.base64,
+            fileName: docx.fileName,
+          }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          console.warn(
+            `[pdf] Backfill failed for ${job.folderName}:`,
+            data.error ?? res.status
+          );
+          continue;
+        }
+        const data = (await res.json()) as {
+          pdfBase64?: string;
+          pdfFileName?: string;
+        };
+        if (!data.pdfBase64) continue;
+        job.files.push({
+          fileName:
+            data.pdfFileName || docx.fileName.replace(/\.docx$/i, ".pdf"),
+          base64: data.pdfBase64,
+        });
+        // Reflect PDF presence in the jobs table when folder name matches.
+        setJobs((prev) =>
+          prev.map((row) =>
+            row.folderName === job.folderName ? { ...row, hasPdf: true } : row
+          )
+        );
+      } catch (err) {
+        console.warn(
+          `[pdf] Backfill error for ${job.folderName}:`,
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+  }
+
   async function downloadZip(prefix?: string, folderPaths?: string[], inlineZip?: { base64: string; fileName: string }) {
     const name = (prefix ?? resumeNamePrefix).trim() || "resume";
     const zipName = `${name}_resumes.zip`;
@@ -574,7 +627,18 @@ export default function AutomationDashboard() {
       return;
     }
 
-    // Prefer server ZIP when folders still exist (correct CRC via adm-zip).
+    // Fill any missing PDFs from DOCX before zipping (same layout convert, not LLM).
+    if (batchFilesRef.current.length > 0) {
+      await ensurePdfsForBatchFiles();
+      try {
+        triggerBlobDownload(zipFilesFromBatch(batchFilesRef.current), zipName);
+        return;
+      } catch (err) {
+        console.warn("[zip] Client ZIP failed, trying server:", err);
+        // fall through to server ZIP
+      }
+    }
+
     const paths = folderPaths ?? batchFolderPaths;
     if (settings && paths.length > 0) {
       try {
@@ -585,6 +649,7 @@ export default function AutomationDashboard() {
             outputDir: settings.outputDir,
             zipFileName: zipName,
             folderPaths: paths,
+            ensurePdf: true,
           }),
         });
         if (res.ok) {
@@ -592,17 +657,14 @@ export default function AutomationDashboard() {
           triggerBlobDownload(blob, zipName);
           return;
         }
-      } catch {
-        // fall through to in-browser ZIP
-      }
-    }
-
-    if (batchFilesRef.current.length > 0) {
-      try {
-        triggerBlobDownload(zipFilesFromBatch(batchFilesRef.current), zipName);
+        const data = await res.json().catch(() => ({}));
+        setError(
+          data.error ??
+            "ZIP failed — on Vercel the temp folder is cleared after the run; re-run and use the automatic download."
+        );
         return;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "ZIP creation failed");
+        setError(err instanceof Error ? err.message : "Download failed");
         return;
       }
     }
@@ -977,9 +1039,9 @@ export default function AutomationDashboard() {
         <div className="art-banner art-banner--warn" role="status">
           <strong>Same parallel engine as localhost.</strong> Jobs run concurrently via
           separate API calls (your Parallel jobs setting). Playwright still needs a local
-          machine (Vercel uses HTTP scrape fallback). PDF is a real DOCX→PDF convert (same
-          layout) via <code>CONVERTAPI_SECRET</code> — not OpenRouter / not a restyled
-          markdown PDF.
+          machine (Vercel uses HTTP scrape fallback). PDF is always DOCX→PDF (same layout)
+          via Word/LibreOffice/<code>CONVERTAPI_SECRET</code> — missing PDFs are backfilled
+          from the DOCX before ZIP download (not OpenRouter).
         </div>
       )}
 

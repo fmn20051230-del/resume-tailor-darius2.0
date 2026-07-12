@@ -1,5 +1,6 @@
 import type { AutomationProgressEvent, AutomationRunConfig } from "./types";
 import { clearOutputDirectory, buildZipFromEntries, type ZipFolderEntry } from "./folder-output";
+import { convertDocxToPdf } from "./docx-to-pdf";
 import { runSingleAutomationJob, type ProgressEmitter } from "./run-single-job";
 
 export type { ProgressEmitter } from "./run-single-job";
@@ -129,6 +130,27 @@ export async function runAutomationPipeline(
   let zipFileName: string | undefined;
   if (zipEntries.length > 0) {
     try {
+      // Backfill any missing PDFs from DOCX before building the archive.
+      for (const entry of zipEntries) {
+        const docx = entry.files.find((f) => /\.docx$/i.test(f.name));
+        const hasPdf = entry.files.some((f) => /\.pdf$/i.test(f.name));
+        if (!docx?.data?.length || hasPdf) continue;
+        try {
+          const pdf = await convertDocxToPdf(docx.data);
+          if (pdf?.length) {
+            entry.files.push({
+              name: docx.name.replace(/\.docx$/i, ".pdf"),
+              data: pdf,
+            });
+          }
+        } catch (err) {
+          console.warn(
+            `[zip] PDF backfill failed for ${entry.folderName}:`,
+            err instanceof Error ? err.message : err
+          );
+        }
+      }
+
       const zipBuf = buildZipFromEntries(zipEntries);
       zipBase64 = zipBuf.toString("base64");
       zipFileName = `${config.resumeNamePrefix}_resumes.zip`;
