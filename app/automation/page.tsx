@@ -430,7 +430,33 @@ export default function AutomationDashboard() {
     triggerBlobDownload(new Blob([bytes], { type: "application/zip" }), zipFileName);
   }
 
-  /** Minimal store-only ZIP so Vercel can still download when the API zip route has empty /tmp. */
+  /** CRC-32 (ZIP / IEEE) — required; a zero CRC makes Windows report "Checksum error". */
+  function crc32Zip(data: Uint8Array): number {
+    let crc = 0xffffffff;
+    for (let i = 0; i < data.length; i++) {
+      crc ^= data[i];
+      for (let j = 0; j < 8; j++) {
+        crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+      }
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  /** ASCII-safe ZIP entry path (no Unicode dashes/punctuation that break extractors). */
+  function zipSafePath(folderName: string, fileName: string): string {
+    const folder = folderName
+      .normalize("NFKD")
+      .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, "_")
+      .replace(/[^\x20-\x7E]/g, "")
+      .replace(/[\\/:*?"<>|]+/g, "_")
+      .replace(/[,\s]+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_|_$/g, "") || "job";
+    const file = fileName.replace(/[\\/:*?"<>|\x00-\x1f]+/g, "_") || "file";
+    return `${folder}/${file}`;
+  }
+
+  /** Store-only ZIP with correct CRC-32 (browser fallback when server /tmp is empty). */
   function zipFilesFromBatch(
     jobs: { folderName: string; files: { fileName: string; base64: string }[] }[]
   ): Blob {
@@ -442,12 +468,12 @@ export default function AutomationDashboard() {
 
     const u16 = (n: number) => {
       const b = new Uint8Array(2);
-      new DataView(b.buffer).setUint16(0, n, true);
+      new DataView(b.buffer).setUint16(0, n & 0xffff, true);
       return b;
     };
     const u32 = (n: number) => {
       const b = new Uint8Array(4);
-      new DataView(b.buffer).setUint32(0, n, true);
+      new DataView(b.buffer).setUint32(0, n >>> 0, true);
       return b;
     };
     const concat = (chunks: Uint8Array[]) => {
@@ -467,14 +493,18 @@ export default function AutomationDashboard() {
       const data = new Uint8Array(dataBinary.length);
       for (let i = 0; i < dataBinary.length; i++) data[i] = dataBinary.charCodeAt(i);
 
+      const crc = crc32Zip(data);
+      // Bit 11 = UTF-8 filenames (safe even when path is ASCII-only)
+      const gpFlag = 0x0800;
+
       const local = concat([
         u32(0x04034b50),
         u16(20),
+        u16(gpFlag),
+        u16(0), // store (no compression)
         u16(0),
         u16(0),
-        u16(0),
-        u16(0),
-        u32(0),
+        u32(crc),
         u32(data.length),
         u32(data.length),
         u16(nameBytes.length),
@@ -488,11 +518,11 @@ export default function AutomationDashboard() {
         u32(0x02014b50),
         u16(20),
         u16(20),
+        u16(gpFlag),
         u16(0),
         u16(0),
         u16(0),
-        u16(0),
-        u32(0),
+        u32(crc),
         u32(data.length),
         u32(data.length),
         u16(nameBytes.length),
@@ -511,8 +541,13 @@ export default function AutomationDashboard() {
 
     for (const job of jobs) {
       for (const file of job.files) {
-        addFile(`${job.folderName}/${file.fileName}`, file.base64);
+        if (!file.base64) continue;
+        addFile(zipSafePath(job.folderName, file.fileName), file.base64);
       }
+    }
+
+    if (fileCount === 0) {
+      throw new Error("No files to zip");
     }
 
     const centralDir = concat(central);
@@ -539,43 +574,40 @@ export default function AutomationDashboard() {
       return;
     }
 
+    // Prefer server ZIP when folders still exist (correct CRC via adm-zip).
+    const paths = folderPaths ?? batchFolderPaths;
+    if (settings && paths.length > 0) {
+      try {
+        const res = await fetch("/api/automation/download-zip", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            outputDir: settings.outputDir,
+            zipFileName: zipName,
+            folderPaths: paths,
+          }),
+        });
+        if (res.ok) {
+          const blob = await res.blob();
+          triggerBlobDownload(blob, zipName);
+          return;
+        }
+      } catch {
+        // fall through to in-browser ZIP
+      }
+    }
+
     if (batchFilesRef.current.length > 0) {
       try {
         triggerBlobDownload(zipFilesFromBatch(batchFilesRef.current), zipName);
         return;
-      } catch {
-        // fall through to API
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "ZIP creation failed");
+        return;
       }
     }
 
-    if (!settings) return;
-    const paths = folderPaths ?? batchFolderPaths;
-    if (!paths.length) {
-      setError("No completed resumes from this batch to download.");
-      return;
-    }
-    try {
-      const res = await fetch("/api/automation/download-zip", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          outputDir: settings.outputDir,
-          zipFileName: zipName,
-          folderPaths: paths,
-        }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(
-          data.error ??
-            "ZIP failed — on Vercel the temp folder is cleared after the run; re-run and use the automatic download."
-        );
-      }
-      const blob = await res.blob();
-      triggerBlobDownload(blob, zipName);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Download failed");
-    }
+    setError("No completed resumes from this batch to download.");
   }
 
   async function handleStart() {

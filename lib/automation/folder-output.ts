@@ -11,8 +11,12 @@ function isServerless(): boolean {
 
 export function sanitizeFolderSegment(text: string, maxLength = 80): string {
   return text
+    .normalize("NFKD")
+    // Em/en dashes and similar → underscore (ZIP/Windows path safe)
+    .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, "_")
+    .replace(/[^\x20-\x7E]/g, "") // strip remaining non-ASCII
     .replace(INVALID_SEGMENT_RE, " ")
-    .replace(/\s+/g, "_")
+    .replace(/[,\s]+/g, "_")
     .replace(/_+/g, "_")
     .replace(/^_|_$/g, "")
     .slice(0, maxLength) || "Unknown";
