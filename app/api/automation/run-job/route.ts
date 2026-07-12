@@ -77,8 +77,10 @@ export async function POST(request: NextRequest) {
   ];
 
   const onVercel = Boolean(process.env.VERCEL);
-  // Each job gets its own 300s budget on Vercel — keep attempts inside that window.
-  const attemptTimeoutMs = onVercel ? 90_000 : RESUME_ATTEMPT_TIMEOUT_MS;
+  // Each job gets its own ~300s budget on Vercel. 90s was too short (LLM often needs
+  // 1.5–3 min) and caused false failures around the 3-minute mark. Leave ~45s for
+  // scrape/extract/save; give generate ~2.5 min × 2 attempts (validation retries).
+  const attemptTimeoutMs = onVercel ? 150_000 : RESUME_ATTEMPT_TIMEOUT_MS;
   const maxAttempts = onVercel ? 2 : MAX_RESUME_GENERATE_ATTEMPTS;
 
   const encoder = new TextEncoder();

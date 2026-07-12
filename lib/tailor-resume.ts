@@ -55,10 +55,17 @@ export type TailorResumeResult = {
   attempts: number;
 };
 
+function formatAttemptLimit(ms: number): string {
+  const totalSec = Math.max(1, Math.round(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return m > 0 ? `${m}m ${String(s).padStart(2, "0")}s` : `${s}s`;
+}
+
 export class ResumeAttemptTimeoutError extends Error {
-  constructor(attempt: number, maxAttempts: number) {
+  constructor(attempt: number, maxAttempts: number, timeoutMs: number) {
     super(
-      `Resume generation attempt ${attempt}/${maxAttempts} exceeded 7 minutes and was terminated`
+      `Resume generation attempt ${attempt}/${maxAttempts} exceeded ${formatAttemptLimit(timeoutMs)} and was terminated`
     );
     this.name = "ResumeAttemptTimeoutError";
   }
@@ -98,7 +105,7 @@ async function runWithTimeout<T>(
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       controller.abort();
-      reject(new ResumeAttemptTimeoutError(attempt, maxAttempts));
+      reject(new ResumeAttemptTimeoutError(attempt, maxAttempts, ms));
     }, ms);
   });
 
