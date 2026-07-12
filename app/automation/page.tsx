@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { parseJobUrls } from "@/lib/automation/parse-urls";
-import type { AutomationProgressEvent } from "@/lib/automation/types";
+import type { AutomationProgressEvent, JobNeedRegenerateEvent } from "@/lib/automation/types";
 import {
   loadSettings,
   mergeServerConfig,
@@ -590,66 +590,74 @@ export default function AutomationDashboard() {
     const folderPaths: string[] = [];
     const poolSize = Math.max(1, Math.min(10, concurrency));
 
-    const readJobStream = async (res: Response) => {
+    const readJobStream = async (
+      res: Response
+    ): Promise<{
+      pendingRegen: JobNeedRegenerateEvent | null;
+      completedOrFailed: boolean;
+    }> => {
       const reader = res.body?.getReader();
       if (!reader) throw new Error("No response stream");
       const decoder = new TextDecoder();
       let buffer = "";
-      let pendingRegen: Extract<
-        AutomationProgressEvent,
-        { type: "job_need_regenerate" }
-      > | null = null;
+      let pendingRegen: JobNeedRegenerateEvent | null = null;
       let completedOrFailed = false;
+
+      const consumeLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) return;
+        const json = trimmed.slice(5).trim();
+        if (!json) return;
+        const event = JSON.parse(json) as
+          | AutomationProgressEvent
+          | { type: "error"; message?: string };
+        if (event.type === "error") {
+          throw new Error(event.message ?? "Job failed");
+        }
+        if (event.type === "heartbeat") {
+          setNowTick(event.at || Date.now());
+          return;
+        }
+        if (event.type === "job_need_regenerate") {
+          pendingRegen = event;
+          handleEvent(event);
+          return;
+        }
+        if (event.type === "job_complete") {
+          pendingRegen = null;
+          completedOrFailed = true;
+          folderPaths.push(event.folderPath);
+          handleEvent(event);
+          return;
+        }
+        if (event.type === "job_failed" || event.type === "job_skipped") {
+          pendingRegen = null;
+          completedOrFailed = true;
+          handleEvent(event);
+          return;
+        }
+        handleEvent(event);
+      };
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done || stopRef.current) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data:")) continue;
-          const json = trimmed.slice(5).trim();
-          if (!json) continue;
-          const event = JSON.parse(json) as
-            | AutomationProgressEvent
-            | { type: "error"; message?: string };
-          if (event.type === "error") {
-            throw new Error(event.message ?? "Job failed");
+        if (value) {
+          buffer += decoder.decode(value, { stream: !done });
+          const lines = buffer.split("\n");
+          buffer = done ? "" : (lines.pop() ?? "");
+          for (const line of lines) consumeLine(line);
+          if (done && buffer.trim()) {
+            consumeLine(buffer);
+            buffer = "";
           }
-          if (event.type === "heartbeat") {
-            setNowTick(event.at || Date.now());
-            continue;
-          }
-          if (event.type === "job_need_regenerate") {
-            pendingRegen = event;
-            handleEvent(event);
-            continue;
-          }
-          if (event.type === "job_complete") {
-            pendingRegen = null;
-            completedOrFailed = true;
-            folderPaths.push(event.folderPath);
-            handleEvent(event);
-            continue;
-          }
-          if (event.type === "job_failed" || event.type === "job_skipped") {
-            pendingRegen = null;
-            completedOrFailed = true;
-            handleEvent(event);
-            continue;
-          }
-          handleEvent(event);
         }
+        if (done || stopRef.current) break;
       }
 
       return { pendingRegen, completedOrFailed };
     };
 
-    const runGenerateAttempt = async (
-      regen: Extract<AutomationProgressEvent, { type: "job_need_regenerate" }>
-    ) => {
+    const runGenerateAttempt = async (regen: JobNeedRegenerateEvent) => {
       const res = await fetch("/api/automation/generate-attempt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -720,14 +728,13 @@ export default function AutomationDashboard() {
       }
 
       let result = await readJobStream(res);
-      // Deployed: each generate attempt is a separate API call (4.5 min × up to 3).
-      while (result?.pendingRegen && !stopRef.current) {
+      // Timeout-only: continue on a fresh serverless call (missing Summary retries in-process).
+      while (!stopRef.current) {
         const regen = result.pendingRegen;
-        handleEvent({
-          type: "step",
-          index: regen.index,
-          step: "resume_generating",
-          message: `Starting resume attempt ${regen.nextAttempt}/${regen.maxAttempts} (4m 30s limit)…`,
+        if (!regen) break;
+        updateJob(regen.index, {
+          status: "processing",
+          statusLabel: `Starting resume attempt ${regen.nextAttempt}/${regen.maxAttempts}…`,
         });
         result = (await runGenerateAttempt(regen)) ?? {
           pendingRegen: null,

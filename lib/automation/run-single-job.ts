@@ -264,14 +264,28 @@ export async function runResumeGenerateContinuation(
       tailoringPrompt: config.tailoringPrompt,
       apiKey: config.apiKey,
       attemptTimeoutMs,
-      maxAttempts: 1,
-      onAttempt: () => undefined,
+      maxAttempts, // regenerate missing Summary immediately within this call
+      totalBudgetMs: attemptTimeoutMs,
+      onAttempt: (attempt, maxAtt, previousError) => {
+        if (attempt === 1) return;
+        const reason = previousError
+          ? previousError.length > 140
+            ? `${previousError.slice(0, 140)}…`
+            : previousError
+          : "retrying";
+        emitStep(
+          "resume_generating",
+          `Regenerating immediately (${attempt}/${maxAtt}) — ${reason}`
+        );
+      },
     });
 
     emit({ type: "job_resume_content", index, resumeMarkdown: tailored.content });
     emitStep(
       "resume_generated",
-      `Resume generated (attempt ${generateAttempt}/${maxAttempts})`,
+      tailored.attempts > 1
+        ? `Resume generated (after ${tailored.attempts} attempts)`
+        : `Resume generated (attempt ${generateAttempt}/${maxAttempts})`,
       Date.now() - tailorStarted
     );
 
@@ -298,7 +312,8 @@ export async function runResumeGenerateContinuation(
       /attempt \d+\/\d+/i,
       `attempt ${generateAttempt}/${maxAttempts}`
     );
-    if (isRegenerableTailorError(err) && generateAttempt < maxAttempts) {
+    const timedOut = /exceeded .+ and was terminated|timed out|timeout/i.test(msg);
+    if (timedOut && isRegenerableTailorError(err) && generateAttempt < maxAttempts) {
       emit({
         type: "job_need_regenerate",
         index,
@@ -323,7 +338,7 @@ export async function runResumeGenerateContinuation(
       });
       emitStep(
         "resume_generating",
-        `Attempt ${generateAttempt}/${maxAttempts} failed — will retry (${msg.slice(0, 100)})`
+        `Attempt ${generateAttempt}/${maxAttempts} timed out — starting next attempt…`
       );
       return "needs_regenerate";
     }
@@ -490,18 +505,17 @@ export async function runSingleAutomationJob(
       return "failed";
     }
 
-    // Deployed: 1 attempt per serverless call (4.5 min). Client retries up to 3.
-    // Local: up to 3 attempts in-process (7 min each).
-    const inProcessAttempts = onVercel ? 1 : maxAttempts;
+    // Always up to 3 in-process attempts so missing-Summary regenerates immediately.
+    // On Vercel, share one 4.5 min budget across those attempts (validation fails are fast).
+    // Full timeouts that burn the budget still emit job_need_regenerate for a fresh call.
+    const inProcessAttempts = maxAttempts;
 
     let docxBuffer: Buffer;
     let resumeMarkdown: string;
     try {
       emitStep(
         "resume_generating",
-        onVercel
-          ? `Resume generating attempt ${generateAttempt}/${maxAttempts} (${formatDuration(attemptTimeoutMs)} limit)`
-          : `Resume generating (${formatDuration(attemptTimeoutMs)} limit, up to ${maxAttempts} attempts)`
+        `Resume generating (${formatDuration(attemptTimeoutMs)} limit, up to ${maxAttempts} attempts)`
       );
       const tailorStarted = Date.now();
       const tailored = await tailorResume({
@@ -512,16 +526,17 @@ export async function runSingleAutomationJob(
         apiKey: config.apiKey,
         attemptTimeoutMs,
         maxAttempts: inProcessAttempts,
+        totalBudgetMs: onVercel ? attemptTimeoutMs : undefined,
         onAttempt: (attempt, maxAtt, previousError) => {
           if (attempt === 1) return;
           const reason = previousError
-            ? previousError.length > 120
-              ? `${previousError.slice(0, 120)}…`
+            ? previousError.length > 140
+              ? `${previousError.slice(0, 140)}…`
               : previousError
             : "retrying";
           emitStep(
             "resume_generating",
-            `Resume regenerating (${attempt}/${maxAtt}) — ${reason}`
+            `Regenerating immediately (${attempt}/${maxAtt}) — ${reason}`
           );
         },
       });
@@ -542,7 +557,14 @@ export async function runSingleAutomationJob(
         /attempt \d+\/\d+/i,
         `attempt ${generateAttempt}/${maxAttempts}`
       );
-      if (onVercel && isRegenerableTailorError(err) && generateAttempt < maxAttempts) {
+      // Only hop to a new serverless call when this invocation timed out and budget is gone.
+      const timedOut = /exceeded .+ and was terminated|timed out|timeout/i.test(msg);
+      if (
+        onVercel &&
+        timedOut &&
+        isRegenerableTailorError(err) &&
+        generateAttempt < maxAttempts
+      ) {
         emit({
           type: "job_need_regenerate",
           index,
@@ -567,7 +589,7 @@ export async function runSingleAutomationJob(
         });
         emitStep(
           "resume_generating",
-          `Attempt ${generateAttempt}/${maxAttempts} failed — will retry (${msg.slice(0, 100)})`
+          `Attempt ${generateAttempt}/${maxAttempts} timed out — starting next attempt…`
         );
         return "needs_regenerate";
       }
