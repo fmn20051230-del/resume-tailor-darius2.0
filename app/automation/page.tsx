@@ -627,7 +627,7 @@ export default function AutomationDashboard() {
 
     if (backfillFailures > 0) {
       setError(
-        `${backfillFailures} PDF(s) could not be converted from DOCX. Check server logs (mammoth + Chromium).`
+        `${backfillFailures} PDF(s) missing. Add ConvertAPI Secret in Settings so Vercel can convert each DOCX → PDF with the same Word layout.`
       );
     }
   }
@@ -1054,9 +1054,14 @@ export default function AutomationDashboard() {
 
       {isProductionHost && (
         <div className="art-banner art-banner--warn" role="status">
-          <strong>Deployed PDF:</strong> Uses open-source{" "}
-          <code>mammoth</code> + Chromium to convert each DOCX → PDF (no ConvertAPI /
-          OpenRouter required). Localhost still prefers Microsoft Word when available.
+          <strong>Same-layout PDF on Vercel:</strong> Localhost uses Microsoft Word to
+          convert the DOCX file. Vercel has no Word — set{" "}
+          <strong>ConvertAPI Secret</strong> in{" "}
+          <a href="/automation?tab=settings">Settings</a> (free at{" "}
+          <a href="https://www.convertapi.com" target="_blank" rel="noreferrer">
+            convertapi.com
+          </a>
+          ). That converts the real DOCX → PDF (same style). Not OpenRouter.
         </div>
       )}
 
@@ -1468,7 +1473,8 @@ export default function AutomationDashboard() {
                   <li>📄 {resumeFileBase}.docx</li>
                   <li>
                     {activeJob.hasPdf ? "📄" : "⚠"} {resumeFileBase}.pdf
-                    {!activeJob.hasPdf && " (DOCX→PDF conversion pending/failed)"}
+                    {!activeJob.hasPdf &&
+                      " (set ConvertAPI Secret in Settings for same-layout PDF)"}
                   </li>
                   <li>🔗 job_url.txt</li>
                   <li>📝 raw_jd.txt</li>

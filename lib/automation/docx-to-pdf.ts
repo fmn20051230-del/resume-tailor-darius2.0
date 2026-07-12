@@ -1,11 +1,13 @@
 /**
  * Converts a generated DOCX resume to PDF from the real DOCX bytes (no OpenRouter).
+ * Preserves Word layout — does NOT re-render via HTML/markdown.
  *
  * Order:
- *   1. Microsoft Word COM (Windows localhost)
- *   2. LibreOffice (local non-serverless)
- *   3. Open-source: mammoth (DOCX→HTML) + @sparticuz/chromium (HTML→PDF) — works on Vercel, no API
- *   4. Optional ConvertAPI if CONVERTAPI_SECRET / Settings secret is set (closer to Word layout)
+ *   1. Microsoft Word COM (Windows localhost) — identical layout
+ *   2. LibreOffice (local) — near-identical layout
+ *   3. ConvertAPI (Vercel / when Word & LibreOffice unavailable) — DOCX binary → PDF
+ *
+ * Note: HTML/Chromium conversion is intentionally not used — it changes the style.
  */
 import { execFile } from "child_process";
 import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
@@ -101,82 +103,6 @@ async function convertWithLibreOffice(docxBuffer: Buffer): Promise<Buffer | null
   }
 }
 
-/**
- * Open-source DOCX→PDF for Vercel: mammoth renders the DOCX to HTML, then
- * headless Chromium prints that HTML to PDF. No external conversion API.
- */
-async function convertWithMammothChromium(docxBuffer: Buffer): Promise<Buffer | null> {
-  try {
-    const mammoth = await import("mammoth");
-    const result = await mammoth.convertToHtml({ buffer: docxBuffer });
-    const bodyHtml = result.value?.trim();
-    if (!bodyHtml) {
-      console.warn("[pdf] mammoth returned empty HTML");
-      return null;
-    }
-
-    const html = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <style>
-    @page { margin: 0.6in; size: Letter; }
-    html, body {
-      margin: 0;
-      padding: 0;
-      background: #fff;
-      color: #111;
-      font-family: Calibri, "Segoe UI", Arial, sans-serif;
-      font-size: 11pt;
-      line-height: 1.35;
-    }
-    body { padding: 0.15in 0.1in; }
-    p { margin: 0 0 6pt 0; }
-    h1 { font-size: 18pt; margin: 0 0 8pt 0; text-align: center; }
-    h2 { font-size: 12pt; margin: 14pt 0 6pt 0; border-bottom: 1px solid #333; padding-bottom: 2pt; }
-    h3 { font-size: 11pt; margin: 8pt 0 4pt 0; }
-    ul, ol { margin: 0 0 6pt 18pt; padding: 0; }
-    li { margin: 0 0 3pt 0; }
-    a { color: #0645ad; text-decoration: none; }
-    table { border-collapse: collapse; width: 100%; }
-    td, th { vertical-align: top; }
-  </style>
-</head>
-<body>${bodyHtml}</body>
-</html>`;
-
-    const chromium = (await import("@sparticuz/chromium")).default;
-    const puppeteer = await import("puppeteer-core");
-
-    const executablePath = await chromium.executablePath();
-    const browser = await puppeteer.default.launch({
-      args: chromium.args,
-      executablePath,
-      headless: true,
-      defaultViewport: { width: 816, height: 1056, deviceScaleFactor: 1 },
-    });
-
-    try {
-      const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: "load", timeout: 60_000 });
-      const pdf = await page.pdf({
-        format: "Letter",
-        printBackground: true,
-        margin: { top: "0.55in", right: "0.55in", bottom: "0.55in", left: "0.55in" },
-      });
-      return Buffer.isBuffer(pdf) ? pdf : Buffer.from(pdf);
-    } finally {
-      await browser.close().catch(() => {});
-    }
-  } catch (err) {
-    console.warn(
-      "[pdf] mammoth+Chromium DOCX→PDF failed:",
-      err instanceof Error ? err.message : err
-    );
-    return null;
-  }
-}
-
 function getConvertApiCredential(override?: string | null): string | null {
   const fromOverride = override?.trim();
   if (fromOverride) return fromOverride;
@@ -212,7 +138,10 @@ async function downloadConvertApiFile(
   return null;
 }
 
-/** Optional paid ConvertAPI — only used when a secret is configured. */
+/**
+ * True DOCX binary → PDF (keeps Word layout). Used on Vercel where Word/LibreOffice
+ * are not installed. No OpenRouter.
+ */
 async function convertWithConvertApiOnce(
   docxBuffer: Buffer,
   secret: string
@@ -284,7 +213,14 @@ async function convertWithConvertApi(
   convertApiSecret?: string | null
 ): Promise<Buffer | null> {
   const secret = getConvertApiCredential(convertApiSecret);
-  if (!secret) return null;
+  if (!secret) {
+    if (isServerless()) {
+      console.warn(
+        "[pdf] No ConvertAPI secret — cannot do layout-faithful DOCX→PDF on Vercel (Word/LibreOffice unavailable)."
+      );
+    }
+    return null;
+  }
 
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= PDF_CONVERT_ATTEMPTS; attempt++) {
@@ -320,33 +256,26 @@ async function convertDocxToPdfOnce(
   docxBuffer: Buffer,
   convertApiSecret?: string | null
 ): Promise<Buffer | null> {
-  if (!isServerless()) {
-    const fromWord = await convertWithWord(docxBuffer);
-    if (fromWord?.length) return fromWord;
-
-    const fromLibre = await convertWithLibreOffice(docxBuffer);
-    if (fromLibre?.length) return fromLibre;
+  if (isServerless()) {
+    // Vercel: only true DOCX→PDF (ConvertAPI). No HTML re-render.
+    return convertWithConvertApi(docxBuffer, convertApiSecret);
   }
 
-  // Optional ConvertAPI (closer to Word) when user configured a secret.
-  const fromConvertApi = await convertWithConvertApi(docxBuffer, convertApiSecret);
-  if (fromConvertApi?.length) return fromConvertApi;
+  const fromWord = await convertWithWord(docxBuffer);
+  if (fromWord?.length) return fromWord;
 
-  // Open-source path for Vercel / when Word & LibreOffice are unavailable.
-  const fromChromium = await convertWithMammothChromium(docxBuffer);
-  if (fromChromium?.length) return fromChromium;
+  const fromLibre = await convertWithLibreOffice(docxBuffer);
+  if (fromLibre?.length) return fromLibre;
 
-  return null;
+  return convertWithConvertApi(docxBuffer, convertApiSecret);
 }
 
 export type ConvertDocxToPdfOptions = {
-  /** Optional ConvertAPI secret (overrides env). Not required — open-source Chromium is used otherwise. */
+  /** ConvertAPI secret (Settings or env). Required on Vercel for same-layout PDF. */
   convertApiSecret?: string | null;
 };
 
-/**
- * Convert DOCX bytes to PDF bytes. Never regenerates via LLM / OpenRouter.
- */
+/** Convert DOCX bytes → PDF bytes (layout-faithful). Never uses OpenRouter. */
 export async function convertDocxToPdf(
   docxBuffer: Buffer,
   options?: ConvertDocxToPdfOptions
@@ -369,7 +298,7 @@ export async function convertDocxToPdf(
   }
 
   console.warn(
-    "[pdf] Could not convert DOCX→PDF after retries (Word / LibreOffice / mammoth+Chromium / ConvertAPI)."
+    "[pdf] Could not convert DOCX→PDF. Locally: Word/LibreOffice. On Vercel: set ConvertAPI Secret in Settings."
   );
   return null;
 }
@@ -396,7 +325,8 @@ export async function convertResumeToPdf(input: {
   });
 }
 
-export function isPdfConversionConfigured(_convertApiSecret?: string | null): boolean {
-  // Open-source mammoth+Chromium works on Vercel without any API key.
-  return true;
+export function isPdfConversionConfigured(convertApiSecret?: string | null): boolean {
+  if (process.platform === "win32") return true;
+  if (!isServerless()) return true;
+  return Boolean(getConvertApiCredential(convertApiSecret));
 }

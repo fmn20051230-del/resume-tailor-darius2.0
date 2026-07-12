@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "DOCX→PDF failed (open-source mammoth + Chromium). Check Vercel function logs.",
+            "DOCX→PDF failed. On Vercel set ConvertAPI Secret in Settings (converts the real DOCX — same layout as Word). Free at convertapi.com. Locally: install Word or LibreOffice.",
         },
         { status: 502 }
       );
