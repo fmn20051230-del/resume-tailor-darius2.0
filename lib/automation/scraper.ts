@@ -528,6 +528,188 @@ async function scrapeEightfold(parsed: URL): Promise<string | null> {
   }
 }
 
+/**
+ * ADP Workforce Now / MASCSR career pages are a JS SPA — plain HTML has no JD.
+ * Public career-center API works on Vercel without Playwright:
+ *   GET .../job-requisitions/{jobId}?cid={cid}
+ */
+function isAdpHost(hostname: string): boolean {
+  return /(?:^|\.)adp\.com$/i.test(hostname);
+}
+
+type AdpJobDetail = {
+  itemID?: string;
+  requisitionTitle?: string;
+  requisitionDescription?: string;
+  clientRequisitionID?: string;
+  postDate?: string;
+  workLevelCode?: { shortName?: string };
+  payGradeRange?: {
+    minimumRate?: { amountValue?: number; currencyCode?: string };
+    maximumRate?: { amountValue?: number; currencyCode?: string };
+  };
+  requisitionLocations?: Array<{
+    nameCode?: { shortName?: string };
+    address?: {
+      cityName?: string;
+      countrySubdivisionLevel1?: { codeValue?: string };
+      postalCode?: string;
+    };
+  }>;
+  customFieldGroup?: {
+    stringFields?: Array<{
+      stringValue?: string;
+      nameCode?: { codeValue?: string };
+    }>;
+  };
+};
+
+function formatAdpJobDetail(data: AdpJobDetail): string | null {
+  const rawHtml = data.requisitionDescription ?? "";
+  let body = "";
+  if (rawHtml) {
+    const $ = cheerio.load(rawHtml);
+    $("script, style").remove();
+    $("br").replaceWith("\n");
+    $("p, div, li, h1, h2, h3, h4, tr, section").append("\n");
+    body = collapseWhitespace($.root().text());
+  }
+  if (!body.trim()) return null;
+
+  const locations = (data.requisitionLocations ?? [])
+    .map((loc) => {
+      const named = loc.nameCode?.shortName?.trim();
+      if (named) return named;
+      const city = loc.address?.cityName;
+      const state = loc.address?.countrySubdivisionLevel1?.codeValue;
+      return [city, state].filter(Boolean).join(", ");
+    })
+    .filter(Boolean);
+
+  const min = data.payGradeRange?.minimumRate;
+  const max = data.payGradeRange?.maximumRate;
+  let pay = "";
+  if (min?.amountValue != null || max?.amountValue != null) {
+    const currency = min?.currencyCode || max?.currencyCode || "USD";
+    const lo = min?.amountValue != null ? `${min.amountValue}` : "?";
+    const hi = max?.amountValue != null ? `${max.amountValue}` : "?";
+    pay = `${lo} – ${hi} ${currency}`;
+  }
+  const salaryField = data.customFieldGroup?.stringFields?.find(
+    (f) => f.nameCode?.codeValue === "SalaryRange"
+  )?.stringValue;
+
+  const text = collapseWhitespace(
+    [
+      data.requisitionTitle ? `Job Title: ${data.requisitionTitle}` : "",
+      locations.length ? `Location: ${locations.join(" | ")}` : "",
+      data.workLevelCode?.shortName
+        ? `Employment Type: ${data.workLevelCode.shortName}`
+        : "",
+      salaryField || pay ? `Pay: ${salaryField || pay}` : "",
+      data.postDate ? `Posted: ${data.postDate}` : "",
+      data.clientRequisitionID
+        ? `Requisition ID: ${data.clientRequisitionID}`
+        : "",
+      body,
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+  );
+  return text.length >= 80 ? truncate(text) : null;
+}
+
+async function scrapeAdp(parsed: URL): Promise<string | null> {
+  if (!isAdpHost(parsed.hostname)) return null;
+  if (!/workforcenow\.adp\.com/i.test(parsed.hostname) && !/mascsr/i.test(parsed.pathname)) {
+    // Still try if cid+jobId are present on any adp.com careers URL.
+    if (!parsed.searchParams.get("cid") || !parsed.searchParams.get("jobId")) {
+      return null;
+    }
+  }
+
+  const cid = parsed.searchParams.get("cid")?.trim();
+  const jobId =
+    parsed.searchParams.get("jobId")?.trim() ||
+    parsed.searchParams.get("jobid")?.trim() ||
+    parsed.searchParams.get("selectedJobId")?.trim();
+  if (!cid || !jobId) return null;
+
+  const lang =
+    parsed.searchParams.get("lang")?.trim() ||
+    parsed.searchParams.get("locale")?.trim() ||
+    "en_US";
+  const ccId = parsed.searchParams.get("ccId")?.trim();
+
+  const qs = new URLSearchParams({
+    cid,
+    lang,
+    locale: lang,
+  });
+  if (ccId) qs.set("ccId", ccId);
+
+  const api = `https://workforcenow.adp.com/mascsr/default/careercenter/public/events/staffing/v1/job-requisitions/${encodeURIComponent(jobId)}?${qs.toString()}`;
+
+  try {
+    const res = await fetchWithTimeout(api, {
+      headers: {
+        ...BROWSER_HEADERS,
+        Accept: "application/json, text/plain, */*",
+        Referer: parsed.toString(),
+        Origin: "https://workforcenow.adp.com",
+      },
+    });
+    if (!res.ok) {
+      console.warn(`[scrape] ADP job API HTTP ${res.status} for jobId=${jobId}`);
+      return null;
+    }
+    const data = (await res.json()) as AdpJobDetail;
+    const formatted = formatAdpJobDetail(data);
+    if (formatted) return formatted;
+
+    // Some tenants only accept ExternalJobID via listing lookup.
+    const listUrl = `https://workforcenow.adp.com/mascsr/default/careercenter/public/events/staffing/v1/job-requisitions?${qs.toString()}&$top=100&$skip=0`;
+    const listRes = await fetchWithTimeout(listUrl, {
+      headers: {
+        ...BROWSER_HEADERS,
+        Accept: "application/json, text/plain, */*",
+        Referer: parsed.toString(),
+      },
+    });
+    if (!listRes.ok) return null;
+    const list = (await listRes.json()) as { jobRequisitions?: AdpJobDetail[] };
+    const match = (list.jobRequisitions ?? []).find((job) => {
+      const external = job.customFieldGroup?.stringFields?.find(
+        (f) => f.nameCode?.codeValue === "ExternalJobID"
+      )?.stringValue;
+      return (
+        job.itemID === jobId ||
+        external === jobId ||
+        job.clientRequisitionID === jobId
+      );
+    });
+    if (!match?.itemID) return null;
+
+    const detailUrl = `https://workforcenow.adp.com/mascsr/default/careercenter/public/events/staffing/v1/job-requisitions/${encodeURIComponent(match.itemID)}?${qs.toString()}`;
+    const detailRes = await fetchWithTimeout(detailUrl, {
+      headers: {
+        ...BROWSER_HEADERS,
+        Accept: "application/json, text/plain, */*",
+        Referer: parsed.toString(),
+      },
+    });
+    if (!detailRes.ok) return formatAdpJobDetail(match);
+    const detail = (await detailRes.json()) as AdpJobDetail;
+    return formatAdpJobDetail(detail) || formatAdpJobDetail(match);
+  } catch (err) {
+    console.warn(
+      "[scrape] ADP job API failed:",
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
+}
+
 // TTC Portals / Jobvite career sites (*.ttcportals.com) — Cloudflare blocks Node fetch;
 // curl + JSON-LD JobPosting usually works.
 async function scrapeTtcPortals(parsed: URL, rawUrl: string): Promise<string | null> {
@@ -982,6 +1164,15 @@ export async function scrapeJobPage(url: string): Promise<string> {
 
   const eightfold = await scrapeEightfold(parsed);
   if (eightfold) return eightfold;
+
+  // ADP Workforce Now SPA — public JSON API (works on Vercel, no Playwright).
+  if (isAdpHost(parsed.hostname)) {
+    const adp = await scrapeAdp(parsed);
+    if (adp) return adp;
+    throw new Error(
+      "Could not load this ADP Workforce Now posting. Check that the URL still includes cid and jobId, or paste the job description manually."
+    );
+  }
 
   if (/ttcportals\.com$/i.test(parsed.hostname)) {
     const ttc = await scrapeTtcPortals(parsed, normalized);
