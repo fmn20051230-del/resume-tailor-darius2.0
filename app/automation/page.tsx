@@ -573,62 +573,79 @@ export default function AutomationDashboard() {
     const jobs = batchFilesRef.current;
     const convertApiSecret = settings?.convertApiSecret?.trim() || undefined;
     let backfillFailures = 0;
+    let usedBrowserWasm = false;
 
     for (const job of jobs) {
       const docx = job.files.find((f) => /\.docx$/i.test(f.fileName));
       const hasPdf = job.files.some((f) => /\.pdf$/i.test(f.fileName));
       if (!docx?.base64 || hasPdf) continue;
 
+      let pdfBase64: string | null = null;
+      let pdfFileName = docx.fileName.replace(/\.docx$/i, ".pdf");
+
+      // 1) Open-source LibreOffice WASM in the browser (same layout engine, no API).
       try {
-        const res = await fetch("/api/automation/convert-pdf", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            docxBase64: docx.base64,
-            fileName: docx.fileName,
-            convertApiSecret,
-          }),
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          console.warn(
-            `[pdf] Backfill failed for ${job.folderName}:`,
-            data.error ?? res.status
-          );
-          backfillFailures++;
-          continue;
-        }
-        const data = (await res.json()) as {
-          pdfBase64?: string;
-          pdfFileName?: string;
-        };
-        if (!data.pdfBase64) {
-          backfillFailures++;
-          continue;
-        }
-        job.files.push({
-          fileName:
-            data.pdfFileName || docx.fileName.replace(/\.docx$/i, ".pdf"),
-          base64: data.pdfBase64,
-        });
-        setJobs((prev) =>
-          prev.map((row) =>
-            row.folderName === job.folderName ? { ...row, hasPdf: true } : row
-          )
+        const { convertDocxBase64ToPdfInBrowser } = await import(
+          "@/lib/automation/docx-to-pdf-browser"
         );
+        pdfBase64 = await convertDocxBase64ToPdfInBrowser(docx.base64);
+        if (pdfBase64) usedBrowserWasm = true;
       } catch (err) {
-        backfillFailures++;
         console.warn(
-          `[pdf] Backfill error for ${job.folderName}:`,
+          `[pdf] Browser LibreOffice WASM failed for ${job.folderName}:`,
           err instanceof Error ? err.message : err
         );
       }
+
+      // 2) Optional server ConvertAPI fallback.
+      if (!pdfBase64) {
+        try {
+          const res = await fetch("/api/automation/convert-pdf", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              docxBase64: docx.base64,
+              fileName: docx.fileName,
+              convertApiSecret,
+            }),
+          });
+          if (res.ok) {
+            const data = (await res.json()) as {
+              pdfBase64?: string;
+              pdfFileName?: string;
+            };
+            if (data.pdfBase64) {
+              pdfBase64 = data.pdfBase64;
+              if (data.pdfFileName) pdfFileName = data.pdfFileName;
+            }
+          }
+        } catch (err) {
+          console.warn(
+            `[pdf] Server convert failed for ${job.folderName}:`,
+            err instanceof Error ? err.message : err
+          );
+        }
+      }
+
+      if (!pdfBase64) {
+        backfillFailures++;
+        continue;
+      }
+
+      job.files.push({ fileName: pdfFileName, base64: pdfBase64 });
+      setJobs((prev) =>
+        prev.map((row) =>
+          row.folderName === job.folderName ? { ...row, hasPdf: true } : row
+        )
+      );
     }
 
     if (backfillFailures > 0) {
       setError(
-        `${backfillFailures} PDF(s) missing. Add ConvertAPI Secret in Settings so Vercel can convert each DOCX → PDF with the same Word layout.`
+        `${backfillFailures} PDF(s) missing. LibreOffice WASM needs a modern browser (SharedArrayBuffer). First load downloads ~240MB WASM once.`
       );
+    } else if (usedBrowserWasm) {
+      console.log("[pdf] Converted DOCX→PDF with open-source LibreOffice WASM in browser");
     }
   }
 
@@ -641,11 +658,23 @@ export default function AutomationDashboard() {
       return;
     }
 
-    // Fill any missing PDFs from DOCX before zipping (same layout convert, not LLM).
+    // Fill any missing PDFs from DOCX before zipping (LibreOffice WASM in browser).
     if (batchFilesRef.current.length > 0) {
+      setError(null);
+      const missing = batchFilesRef.current.filter(
+        (j) =>
+          j.files.some((f) => /\.docx$/i.test(f.fileName)) &&
+          !j.files.some((f) => /\.pdf$/i.test(f.fileName))
+      ).length;
+      if (missing > 0) {
+        setError(
+          `Converting ${missing} DOCX → PDF with LibreOffice WASM (first load may take a minute)…`
+        );
+      }
       await ensurePdfsForBatchFiles();
       try {
         triggerBlobDownload(zipFilesFromBatch(batchFilesRef.current), zipName);
+        setError(null);
         return;
       } catch (err) {
         console.warn("[zip] Client ZIP failed, trying server:", err);
@@ -1054,14 +1083,9 @@ export default function AutomationDashboard() {
 
       {isProductionHost && (
         <div className="art-banner art-banner--warn" role="status">
-          <strong>Same-layout PDF on Vercel:</strong> Localhost uses Microsoft Word to
-          convert the DOCX file. Vercel has no Word — set{" "}
-          <strong>ConvertAPI Secret</strong> in{" "}
-          <a href="/automation?tab=settings">Settings</a> (free at{" "}
-          <a href="https://www.convertapi.com" target="_blank" rel="noreferrer">
-            convertapi.com
-          </a>
-          ). That converts the real DOCX → PDF (same style). Not OpenRouter.
+          <strong>Open-source DOCX→PDF:</strong> Uses LibreOffice WASM in your browser
+          (same engine as LibreOffice — converts the real DOCX file). First visit downloads
+          ~240MB WASM once. No ConvertAPI / OpenRouter required.
         </div>
       )}
 
@@ -1474,7 +1498,7 @@ export default function AutomationDashboard() {
                   <li>
                     {activeJob.hasPdf ? "📄" : "⚠"} {resumeFileBase}.pdf
                     {!activeJob.hasPdf &&
-                      " (set ConvertAPI Secret in Settings for same-layout PDF)"}
+                      " (PDF added from DOCX via LibreOffice WASM before ZIP)"}
                   </li>
                   <li>🔗 job_url.txt</li>
                   <li>📝 raw_jd.txt</li>

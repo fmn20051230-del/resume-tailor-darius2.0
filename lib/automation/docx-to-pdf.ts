@@ -1,13 +1,15 @@
 /**
  * Converts a generated DOCX resume to PDF from the real DOCX bytes (no OpenRouter).
- * Preserves Word layout — does NOT re-render via HTML/markdown.
+ * Preserves Word/LibreOffice layout — does NOT re-render via HTML/markdown.
  *
  * Order:
- *   1. Microsoft Word COM (Windows localhost) — identical layout
- *   2. LibreOffice (local) — near-identical layout
- *   3. ConvertAPI (Vercel / when Word & LibreOffice unavailable) — DOCX binary → PDF
+ *   1. Microsoft Word COM (Windows localhost)
+ *   2. System LibreOffice (local)
+ *   3. Open-source LibreOffice WASM (@matbee/libreoffice-converter) — works without API
+ *   4. Optional ConvertAPI if a secret is set
  *
- * Note: HTML/Chromium conversion is intentionally not used — it changes the style.
+ * On Vercel serverless, WASM is too large for the function bundle — the browser
+ * converts via /lo-wasm/ (see docx-to-pdf-browser.ts) before ZIP download.
  */
 import { execFile } from "child_process";
 import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
@@ -103,6 +105,37 @@ async function convertWithLibreOffice(docxBuffer: Buffer): Promise<Buffer | null
   }
 }
 
+/** Open-source LibreOffice compiled to WASM — real DOCX→PDF, no external API. */
+async function convertWithLibreOfficeWasm(docxBuffer: Buffer): Promise<Buffer | null> {
+  // Too large (~246MB) to bundle into a Vercel serverless function.
+  if (isServerless()) return null;
+
+  try {
+    const { convertDocument } = await import("@matbee/libreoffice-converter/server");
+    const wasmPath = path.join(
+      process.cwd(),
+      "node_modules",
+      "@matbee",
+      "libreoffice-converter",
+      "wasm"
+    );
+    const result = await convertDocument(
+      docxBuffer,
+      { outputFormat: "pdf" },
+      { wasmPath }
+    );
+    const data = result?.data;
+    if (!data?.length) return null;
+    return Buffer.isBuffer(data) ? data : Buffer.from(data);
+  } catch (err) {
+    console.warn(
+      "[pdf] LibreOffice WASM DOCX→PDF failed:",
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
+}
+
 function getConvertApiCredential(override?: string | null): string | null {
   const fromOverride = override?.trim();
   if (fromOverride) return fromOverride;
@@ -138,10 +171,6 @@ async function downloadConvertApiFile(
   return null;
 }
 
-/**
- * True DOCX binary → PDF (keeps Word layout). Used on Vercel where Word/LibreOffice
- * are not installed. No OpenRouter.
- */
 async function convertWithConvertApiOnce(
   docxBuffer: Buffer,
   secret: string
@@ -213,14 +242,7 @@ async function convertWithConvertApi(
   convertApiSecret?: string | null
 ): Promise<Buffer | null> {
   const secret = getConvertApiCredential(convertApiSecret);
-  if (!secret) {
-    if (isServerless()) {
-      console.warn(
-        "[pdf] No ConvertAPI secret — cannot do layout-faithful DOCX→PDF on Vercel (Word/LibreOffice unavailable)."
-      );
-    }
-    return null;
-  }
+  if (!secret) return null;
 
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= PDF_CONVERT_ATTEMPTS; attempt++) {
@@ -257,7 +279,7 @@ async function convertDocxToPdfOnce(
   convertApiSecret?: string | null
 ): Promise<Buffer | null> {
   if (isServerless()) {
-    // Vercel: only true DOCX→PDF (ConvertAPI). No HTML re-render.
+    // Serverless: prefer ConvertAPI if configured; otherwise browser WASM backfill handles PDF.
     return convertWithConvertApi(docxBuffer, convertApiSecret);
   }
 
@@ -267,11 +289,13 @@ async function convertDocxToPdfOnce(
   const fromLibre = await convertWithLibreOffice(docxBuffer);
   if (fromLibre?.length) return fromLibre;
 
+  const fromWasm = await convertWithLibreOfficeWasm(docxBuffer);
+  if (fromWasm?.length) return fromWasm;
+
   return convertWithConvertApi(docxBuffer, convertApiSecret);
 }
 
 export type ConvertDocxToPdfOptions = {
-  /** ConvertAPI secret (Settings or env). Required on Vercel for same-layout PDF. */
   convertApiSecret?: string | null;
 };
 
@@ -298,7 +322,7 @@ export async function convertDocxToPdf(
   }
 
   console.warn(
-    "[pdf] Could not convert DOCX→PDF. Locally: Word/LibreOffice. On Vercel: set ConvertAPI Secret in Settings."
+    "[pdf] Server DOCX→PDF unavailable — browser LibreOffice WASM will convert before ZIP on Vercel."
   );
   return null;
 }
@@ -325,8 +349,7 @@ export async function convertResumeToPdf(input: {
   });
 }
 
-export function isPdfConversionConfigured(convertApiSecret?: string | null): boolean {
-  if (process.platform === "win32") return true;
-  if (!isServerless()) return true;
-  return Boolean(getConvertApiCredential(convertApiSecret));
+export function isPdfConversionConfigured(_convertApiSecret?: string | null): boolean {
+  // Browser LibreOffice WASM always available when /lo-wasm assets are deployed.
+  return true;
 }

@@ -92,7 +92,7 @@ export function SettingsPanel() {
             </div>
             <div className="art-form-row">
               <label className="art-label" htmlFor="convert-api">
-                ConvertAPI Secret
+                ConvertAPI Secret (optional)
                 {settings.convertApiSecret.trim().length > 4 && (
                   <span className="art-connected">Connected</span>
                 )}
@@ -103,16 +103,12 @@ export function SettingsPanel() {
                 className="art-input"
                 value={settings.convertApiSecret}
                 onChange={(e) => update({ convertApiSecret: e.target.value })}
-                placeholder="Required on Vercel — converts DOCX→PDF with Word layout"
+                placeholder="Optional fallback — primary path is LibreOffice WASM"
                 autoComplete="off"
               />
               <p className="art-hint">
-                Free at{" "}
-                <a href="https://www.convertapi.com" target="_blank" rel="noreferrer">
-                  convertapi.com
-                </a>
-                . Converts the real DOCX file to PDF (same style as Word). Not used for
-                LLM / OpenRouter. Localhost can use Word instead.
+                Not required. Deployed app converts DOCX→PDF with open-source LibreOffice
+                WASM in the browser. ConvertAPI is only a fallback.
               </p>
             </div>
             <div className="art-form-row">

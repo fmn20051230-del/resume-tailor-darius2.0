@@ -8,16 +8,23 @@ const onVercel = Boolean(process.env.VERCEL);
 const nextConfig = {
   experimental: {
     serverComponentsExternalPackages: onVercel
-      ? []
-      : ["playwright", "playwright-core", "libreoffice-convert"],
+      ? ["@matbee/libreoffice-converter"]
+      : [
+          "playwright",
+          "playwright-core",
+          "libreoffice-convert",
+          "@matbee/libreoffice-converter",
+        ],
+    // Keep ~246MB LibreOffice WASM out of serverless function bundles.
+    // Browser loads it from /lo-wasm/ static files instead.
     outputFileTracingExcludes: {
       "*": [
         "node_modules/playwright/**",
         "node_modules/playwright-core/**",
         "node_modules/libreoffice-convert/**",
         "node_modules/@img/**",
-        "node_modules/@sparticuz/chromium/**",
-        "node_modules/puppeteer-core/**",
+        "node_modules/@matbee/libreoffice-converter/wasm/**",
+        "public/lo-wasm/**",
       ],
     },
   },
@@ -32,6 +39,13 @@ const nextConfig = {
           "lib/automation/libreoffice-stub.cjs"
         ),
       };
+    }
+    // Browser LibreOffice converter should not be pulled into the server bundle.
+    if (isServer) {
+      config.externals = config.externals || [];
+      if (Array.isArray(config.externals)) {
+        config.externals.push("@matbee/libreoffice-converter/browser");
+      }
     }
     return config;
   },

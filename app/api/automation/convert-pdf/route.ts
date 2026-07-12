@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "DOCX→PDF failed. On Vercel set ConvertAPI Secret in Settings (converts the real DOCX — same layout as Word). Free at convertapi.com. Locally: install Word or LibreOffice.",
+            "Server DOCX→PDF unavailable. The app converts in the browser with open-source LibreOffice WASM before ZIP download.",
         },
         { status: 502 }
       );

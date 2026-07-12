@@ -17,19 +17,40 @@ function getClientIp(request: NextRequest): string {
   return "unknown";
 }
 
+/** LibreOffice WASM in the browser needs SharedArrayBuffer (COOP + COEP). */
+function withWasmHeaders(response: NextResponse, pathname: string): NextResponse {
+  if (
+    pathname.startsWith("/automation") ||
+    pathname.startsWith("/lo-wasm")
+  ) {
+    response.headers.set("Cross-Origin-Opener-Policy", "same-origin");
+    response.headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+    // Allow same-origin WASM/worker fetches under COEP.
+    response.headers.set("Cross-Origin-Resource-Policy", "same-origin");
+  }
+  return response;
+}
+
 export function middleware(request: NextRequest) {
+  const pathname = request.nextUrl.pathname;
   const allowed = getAllowedIps();
+
   if (allowed.length === 0) {
-    return NextResponse.next();
+    return withWasmHeaders(NextResponse.next(), pathname);
   }
 
   if (request.nextUrl.pathname.startsWith("/api/docx/staged/")) {
-    return NextResponse.next();
+    return withWasmHeaders(NextResponse.next(), pathname);
+  }
+
+  // Static WASM assets must stay reachable for PDF conversion.
+  if (pathname.startsWith("/lo-wasm")) {
+    return withWasmHeaders(NextResponse.next(), pathname);
   }
 
   const clientIp = getClientIp(request);
   if (allowed.includes(clientIp)) {
-    return NextResponse.next();
+    return withWasmHeaders(NextResponse.next(), pathname);
   }
 
   if (request.nextUrl.pathname === "/blocked") {

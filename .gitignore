@@ -38,3 +38,6 @@ next-env.d.ts
 
 # automation output folders
 /output
+
+# LibreOffice WASM static assets (copied from node_modules on postinstall/build)
+/public/lo-wasm
