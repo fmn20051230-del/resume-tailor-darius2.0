@@ -991,6 +991,71 @@
   overflow-x: auto;
 }
 
+.art-failed-urls {
+  margin-top: 0.75rem;
+}
+
+.art-failed-urls-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.35rem;
+}
+
+.art-failed-urls-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.art-failed-urls-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.art-failed-urls-item {
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  border-radius: var(--art-radius, 8px);
+  background: rgba(248, 113, 113, 0.06);
+}
+
+.art-failed-urls-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.art-failed-urls-idx {
+  font-size: 0.75rem;
+  color: var(--art-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.art-failed-urls-link {
+  display: block;
+  color: var(--art-blue, #60a5fa);
+  font-size: 0.82rem;
+  word-break: break-all;
+  line-height: 1.35;
+}
+
+.art-failed-urls-error {
+  margin: 0.4rem 0 0;
+  font-size: 0.78rem;
+  color: var(--art-red, #f87171);
+  line-height: 1.35;
+}
+
 @media (max-width: 1100px) {
   .art-dashboard-grid,
   .art-settings-grid {

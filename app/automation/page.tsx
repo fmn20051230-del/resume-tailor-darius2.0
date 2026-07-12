@@ -154,10 +154,15 @@ export default function AutomationDashboard() {
   const [completed, setCompleted] = useState(0);
   const [failed, setFailed] = useState(0);
   const [skipped, setSkipped] = useState(0);
+  const [copiedFailedUrls, setCopiedFailedUrls] = useState(false);
   const [batchFolderPaths, setBatchFolderPaths] = useState<string[]>([]);
   const [batchStartedAt, setBatchStartedAt] = useState<number | null>(null);
   const [batchElapsedMs, setBatchElapsedMs] = useState(0);
   const [nowTick, setNowTick] = useState(() => Date.now());
+
+  const problemJobs = jobs.filter(
+    (j) => j.status === "failed" || j.status === "skipped"
+  );
 
   const stopRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -1061,6 +1066,33 @@ export default function AutomationDashboard() {
     await downloadZip();
   }
 
+  async function copyFailedUrls() {
+    const lines = problemJobs.map((j) => j.url).filter(Boolean);
+    if (!lines.length) return;
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+      setCopiedFailedUrls(true);
+      window.setTimeout(() => setCopiedFailedUrls(false), 2000);
+    } catch {
+      setError("Could not copy URLs to clipboard.");
+    }
+  }
+
+  async function copyFailedUrlsWithErrors() {
+    const lines = problemJobs.map((j) => {
+      const reason = (j.error || j.statusLabel || j.status).replace(/\s+/g, " ").trim();
+      return `${j.url}\n  → ${reason}`;
+    });
+    if (!lines.length) return;
+    try {
+      await navigator.clipboard.writeText(lines.join("\n\n"));
+      setCopiedFailedUrls(true);
+      window.setTimeout(() => setCopiedFailedUrls(false), 2000);
+    } catch {
+      setError("Could not copy URLs to clipboard.");
+    }
+  }
+
   async function openFolder(folderPath: string) {
     try {
       const res = await fetch("/api/automation/open-folder", {
@@ -1314,6 +1346,64 @@ export default function AutomationDashboard() {
                   {progressPct}% overall ({completed} / {total} done) · {formatElapsed(liveBatchElapsed)}
                 </span>
               </div>
+
+              {!running && problemJobs.length > 0 && (
+                <section className="art-card art-failed-urls" aria-live="polite">
+                  <div className="art-failed-urls-head">
+                    <h2 className="art-card-title">
+                      Failed / skipped URLs ({problemJobs.length})
+                    </h2>
+                    <div className="art-failed-urls-actions">
+                      <button
+                        type="button"
+                        className="art-btn art-btn--ghost art-btn--sm"
+                        onClick={copyFailedUrls}
+                      >
+                        {copiedFailedUrls ? "Copied ✓" : "Copy all URLs"}
+                      </button>
+                      <button
+                        type="button"
+                        className="art-btn art-btn--ghost art-btn--sm"
+                        onClick={copyFailedUrlsWithErrors}
+                      >
+                        Copy URLs + errors
+                      </button>
+                    </div>
+                  </div>
+                  <p className="art-hint">
+                    Paste these back into the URL box to retry, or open them in a browser and paste the JD manually.
+                  </p>
+                  <ul className="art-failed-urls-list">
+                    {problemJobs.map((j) => (
+                      <li key={`${j.index}-${j.url}`} className="art-failed-urls-item">
+                        <div className="art-failed-urls-meta">
+                          <span className="art-failed-urls-idx">
+                            #{String(j.index).padStart(2, "0")}
+                          </span>
+                          <span
+                            className={`art-status art-status--${j.status}`}
+                          >
+                            {j.status}
+                          </span>
+                        </div>
+                        <a
+                          className="art-failed-urls-link"
+                          href={j.url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {j.url}
+                        </a>
+                        {j.error && (
+                          <p className="art-failed-urls-error" title={j.error}>
+                            {j.error}
+                          </p>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
 
               <section className="art-card art-preview-card">
                 <div className="art-preview-head">

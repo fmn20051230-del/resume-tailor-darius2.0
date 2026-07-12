@@ -45,7 +45,11 @@ function looksLikeBotChallenge(text: string): boolean {
   if (
     text.includes("JobPosting") ||
     text.includes("iCIMS_Expandable_Text") ||
-    text.includes("job_description")
+    text.includes("job_description") ||
+    text.includes('id="job-description"') ||
+    text.includes("id='job-description'") ||
+    text.includes("jobDescriptionHeader") ||
+    text.includes("__NEXT_DATA__")
   ) {
     return false;
   }
@@ -157,44 +161,223 @@ async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Respon
 
 // ---------- Fast API paths (no browser needed) ----------
 
-// Greenhouse (boards.greenhouse.io / job-boards.greenhouse.io)
-async function scrapeGreenhouse(parsed: URL): Promise<string | null> {
-  if (!/greenhouse\.io$/i.test(parsed.hostname)) return null;
-  const segments = parsed.pathname.split("/").filter(Boolean);
-  const jobsIdx = segments.indexOf("jobs");
-  const board = segments[0];
-  const jobId = jobsIdx >= 0 ? segments[jobsIdx + 1] : segments[segments.length - 1];
-  if (!board || !jobId || !/^\d+$/.test(jobId)) return null;
+/** Decode Greenhouse job HTML content field into plain text. */
+function formatGreenhouseJob(data: {
+  title?: string;
+  location?: { name?: string };
+  content?: string;
+  company_name?: string;
+}): string | null {
+  if (!data.content) return null;
+  const decoded = data.content
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+  const text = collapseWhitespace(
+    [
+      data.title ? `Job Title: ${data.title}` : "",
+      data.company_name ? `Company: ${data.company_name}` : "",
+      data.location?.name ? `Location: ${data.location.name}` : "",
+      htmlToText(decoded),
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+  );
+  return text.length >= 80 ? truncate(text) : null;
+}
+
+async function fetchGreenhouseJobByBoard(
+  board: string,
+  jobId: string
+): Promise<{ text: string | null; notFound: boolean }> {
+  const api = `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(board)}/jobs/${encodeURIComponent(jobId)}`;
   try {
-    const api = `https://boards-api.greenhouse.io/v1/boards/${board}/jobs/${jobId}`;
     const res = await fetchWithTimeout(api, {
       headers: { ...BROWSER_HEADERS, Accept: "application/json" },
     });
-    if (!res.ok) return null;
+    if (res.status === 404) return { text: null, notFound: true };
+    if (!res.ok) return { text: null, notFound: false };
     const data = (await res.json()) as {
       title?: string;
       location?: { name?: string };
       content?: string;
+      company_name?: string;
     };
-    if (!data.content) return null;
-    const decoded = data.content
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&amp;/g, "&")
-      .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
-    const text = collapseWhitespace(
-      [
-        data.title ? `Job Title: ${data.title}` : "",
-        data.location?.name ? `Location: ${data.location.name}` : "",
-        htmlToText(decoded),
-      ]
-        .filter(Boolean)
-        .join("\n\n")
-    );
-    return text.length >= 80 ? truncate(text) : null;
+    return { text: formatGreenhouseJob(data), notFound: false };
   } catch {
+    return { text: null, notFound: false };
+  }
+}
+
+function extractGreenhouseJobId(parsed: URL): string | null {
+  const fromQuery =
+    parsed.searchParams.get("gh_jid") ||
+    parsed.searchParams.get("gh_jid ") ||
+    parsed.searchParams.get("jobId") ||
+    parsed.searchParams.get("job_id");
+  if (fromQuery && /^\d+$/.test(fromQuery.trim())) return fromQuery.trim();
+
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  const jobsIdx = segments.findIndex((s) => /^jobs?$/i.test(s));
+  if (jobsIdx >= 0) {
+    const id = segments[jobsIdx + 1]?.split(/[?#]/)[0];
+    if (id && /^\d+$/.test(id)) return id;
+  }
+
+  // /job-detail/5979543004/  /careers/job/7696633  /positions/123
+  for (let i = 0; i < segments.length; i++) {
+    if (
+      /^(job-detail|job|jobs|careers|position|positions|opening|openings|role|roles)$/i.test(
+        segments[i]
+      )
+    ) {
+      const id = segments[i + 1]?.split(/[?#]/)[0];
+      if (id && /^\d{5,}$/.test(id)) return id;
+    }
+  }
+
+  const trailing = segments[segments.length - 1]?.split(/[?#]/)[0];
+  if (trailing && /^\d{6,}$/.test(trailing)) return trailing;
+  return null;
+}
+
+function extractGreenhouseBoardFromUrl(parsed: URL): string | null {
+  const forParam =
+    parsed.searchParams.get("for") ||
+    parsed.searchParams.get("board") ||
+    parsed.searchParams.get("board_token");
+  if (forParam?.trim()) return forParam.trim().toLowerCase();
+
+  if (/greenhouse\.io$/i.test(parsed.hostname)) {
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    // job-boards.greenhouse.io/modernhealth/jobs/…
+    if (segments[0] && !/^(embed|v1|boards)$/i.test(segments[0])) {
+      return segments[0].toLowerCase();
+    }
+  }
+  return null;
+}
+
+/** Common company career hosts → Greenhouse board token. */
+const GREENHOUSE_HOST_BOARDS: Array<{ host: RegExp; board: string }> = [
+  { host: /(?:^|\.)mongodb\.com$/i, board: "mongodb" },
+  { host: /(?:^|\.)cribl\.io$/i, board: "cribl" },
+  { host: /(?:^|\.)ondarowave\.com$/i, board: "ondarowave" },
+  { host: /(?:^|\.)modernhealth\.com$/i, board: "modernhealth" },
+];
+
+function boardFromHostname(hostname: string): string | null {
+  for (const row of GREENHOUSE_HOST_BOARDS) {
+    if (row.host.test(hostname)) return row.board;
+  }
+  return null;
+}
+
+/** Discover board token from page HTML (embed for=, boards-api path, absolute_url). */
+function discoverGreenhouseBoardFromHtml(html: string): string | null {
+  const patterns = [
+    /boards-api\.greenhouse\.io\/v1\/boards\/([a-zA-Z0-9_-]+)/i,
+    /[?&]for=([a-zA-Z0-9_-]+)/i,
+    /job_board\?for=([a-zA-Z0-9_-]+)/i,
+    /"board_token"\s*:\s*"([a-zA-Z0-9_-]+)"/i,
+    /boards\.greenhouse\.io\/([a-zA-Z0-9_-]+)/i,
+    /job-boards\.greenhouse\.io\/([a-zA-Z0-9_-]+)/i,
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m?.[1] && !/^(embed|v1|jobs|job)$/i.test(m[1])) return m[1].toLowerCase();
+  }
+  return null;
+}
+
+/**
+ * Greenhouse — boards.greenhouse.io / job-boards.greenhouse.io / company sites
+ * with ?gh_jid= or /jobs/{id} that proxy Greenhouse.
+ */
+async function scrapeGreenhouse(parsed: URL): Promise<string | null> {
+  const isGreenhouseHost = /greenhouse\.io$/i.test(parsed.hostname);
+  const jobId = extractGreenhouseJobId(parsed);
+  if (!jobId) {
+    if (isGreenhouseHost) return null;
+    // No numeric job id — only continue for greenhouse hosts.
     return null;
   }
+
+  const boardCandidates: string[] = [];
+  const push = (b: string | null | undefined) => {
+    if (!b) return;
+    const t = b.trim().toLowerCase();
+    if (t && !boardCandidates.includes(t)) boardCandidates.push(t);
+  };
+
+  push(extractGreenhouseBoardFromUrl(parsed));
+  push(boardFromHostname(parsed.hostname));
+
+  // Company career pages: peek at HTML for for=board token when still unknown.
+  if (!isGreenhouseHost && boardCandidates.length === 0) {
+    try {
+      const res = await fetchWithTimeout(parsed.toString(), {
+        headers: { ...BROWSER_HEADERS, Accept: "text/html,*/*" },
+      });
+      if (res.ok) {
+        const html = await res.text();
+        push(discoverGreenhouseBoardFromHtml(html));
+      }
+    } catch {
+      // ignore — try known boards only
+    }
+  }
+
+  // Greenhouse host with path board already pushed; if empty, nothing to try.
+  if (boardCandidates.length === 0 && isGreenhouseHost) {
+    push(parsed.pathname.split("/").filter(Boolean)[0]);
+  }
+
+  let sawNotFound = false;
+  for (const board of boardCandidates) {
+    const { text, notFound } = await fetchGreenhouseJobByBoard(board, jobId);
+    if (text) return text;
+    if (notFound) sawNotFound = true;
+  }
+
+  // Last resort: fetch HTML and discover board, then retry once.
+  if (!isGreenhouseHost) {
+    try {
+      const res = await fetchWithTimeout(parsed.toString(), {
+        headers: { ...BROWSER_HEADERS, Accept: "text/html,*/*" },
+      });
+      if (res.ok) {
+        const html = await res.text();
+        const discovered = discoverGreenhouseBoardFromHtml(html);
+        if (discovered && !boardCandidates.includes(discovered)) {
+          const { text, notFound } = await fetchGreenhouseJobByBoard(
+            discovered,
+            jobId
+          );
+          if (text) return text;
+          if (notFound) sawNotFound = true;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (isGreenhouseHost && sawNotFound) {
+    throw new Error(
+      "This Greenhouse posting was not found — it has likely expired or been removed."
+    );
+  }
+
+  // Signal to caller that this looked like Greenhouse but failed (company sites).
+  if (!isGreenhouseHost && boardCandidates.length > 0 && sawNotFound) {
+    throw new Error(
+      "This Greenhouse-hosted posting was not found — it has likely expired or been removed."
+    );
+  }
+
+  return null;
 }
 
 // Lever (jobs.lever.co)
@@ -344,8 +527,18 @@ async function scrapeAshby(parsed: URL, rawUrl = parsed.toString()): Promise<str
     try {
       const jobs = await fetchAshbyBoardJobs(board);
       const match = findAshbyJob(jobs, jobKey);
-      return match ? formatAshbyJob(match) : null;
-    } catch {
+      if (match) return formatAshbyJob(match);
+
+      const detail = await fetchAshbyJobGraphql(board, jobKey);
+      if (detail) return detail;
+
+      throw new Error(
+        "This Ashby posting was not found — it has likely expired, been unlisted, or removed."
+      );
+    } catch (err) {
+      if (err instanceof Error && /Ashby posting was not found/i.test(err.message)) {
+        throw err;
+      }
       return null;
     }
   }
@@ -358,7 +551,296 @@ async function scrapeAshby(parsed: URL, rawUrl = parsed.toString()): Promise<str
     if (!board) return null;
     const jobs = await fetchAshbyBoardJobs(board);
     const match = findAshbyJob(jobs, ashbyJid);
-    return match ? formatAshbyJob(match) : null;
+    if (match) return formatAshbyJob(match);
+    return fetchAshbyJobGraphql(board, ashbyJid);
+  } catch {
+    return null;
+  }
+}
+
+async function fetchAshbyJobGraphql(
+  board: string,
+  jobPostingId: string
+): Promise<string | null> {
+  try {
+    const res = await fetchWithTimeout(
+      "https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiJobPosting",
+      {
+        method: "POST",
+        headers: {
+          ...BROWSER_HEADERS,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          operationName: "ApiJobPosting",
+          variables: {
+            organizationHostedJobsPageName: board,
+            jobPostingId,
+          },
+          query: `query ApiJobPosting($organizationHostedJobsPageName: String!, $jobPostingId: String!) {
+            jobPosting(organizationHostedJobsPageName: $organizationHostedJobsPageName, jobPostingId: $jobPostingId) {
+              id title locationName employmentType descriptionHtml departmentName
+            }
+          }`,
+        }),
+      }
+    );
+    if (!res.ok) return null;
+    const json = (await res.json()) as {
+      data?: {
+        jobPosting?: {
+          title?: string;
+          locationName?: string;
+          departmentName?: string;
+          descriptionHtml?: string;
+        } | null;
+      };
+    };
+    const job = json.data?.jobPosting;
+    if (!job) return null;
+    return formatAshbyJob({
+      title: job.title,
+      location: job.locationName,
+      department: job.departmentName,
+      descriptionHtml: job.descriptionHtml,
+    });
+  } catch {
+    return null;
+  }
+}
+
+// Dayforce / Ceridian (jobs.dayforcehcm.com) — JD is embedded in __NEXT_DATA__.
+async function scrapeDayforce(parsed: URL): Promise<string | null> {
+  if (!/dayforcehcm\.com$/i.test(parsed.hostname)) return null;
+  if (!/\/jobs\/\d+/i.test(parsed.pathname)) return null;
+
+  try {
+    const res = await fetchWithTimeout(parsed.toString(), {
+      headers: { ...BROWSER_HEADERS, Accept: "text/html,*/*" },
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const nd = html.match(
+      /<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i
+    );
+    if (!nd?.[1]) return null;
+    const json = JSON.parse(nd[1]) as {
+      props?: {
+        pageProps?: {
+          jobData?: {
+            jobTitle?: string;
+            postingLocations?: Array<{
+              locationName?: string;
+              cityName?: string;
+              stateCode?: string;
+              countryCode?: string;
+            }>;
+            jobPostingContent?: {
+              jobDescriptionHeader?: string;
+              jobDescription?: string;
+              jobDescriptionFooter?: string;
+            };
+          };
+        };
+      };
+    };
+    const job = json.props?.pageProps?.jobData;
+    if (!job?.jobTitle && !job?.jobPostingContent) return null;
+
+    const content = job.jobPostingContent ?? {};
+    const body = [
+      htmlToText(content.jobDescriptionHeader ?? ""),
+      htmlToText(content.jobDescription ?? ""),
+      htmlToText(content.jobDescriptionFooter ?? ""),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    if (!body.trim()) return null;
+
+    const locations = (job.postingLocations ?? [])
+      .map((loc) => {
+        if (loc.locationName?.trim()) return loc.locationName.trim();
+        return [loc.cityName, loc.stateCode, loc.countryCode]
+          .filter(Boolean)
+          .join(", ");
+      })
+      .filter(Boolean);
+
+    const text = collapseWhitespace(
+      [
+        job.jobTitle ? `Job Title: ${job.jobTitle}` : "",
+        locations.length ? `Location: ${locations.join(" | ")}` : "",
+        body,
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    );
+    return text.length >= 80 ? truncate(text) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Gem (jobs.gem.com/{board}/{extId}) — public GraphQL API.
+async function scrapeGem(parsed: URL): Promise<string | null> {
+  if (!/jobs\.gem\.com$/i.test(parsed.hostname)) return null;
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  const boardId = segments[0];
+  const extId = segments[1];
+  if (!boardId || !extId) return null;
+
+  const query = `query ExternalJobPostingQuery($boardId: String!, $extId: String!) {
+    oatsExternalJobPosting(boardId: $boardId, extId: $extId) {
+      id
+      title
+      descriptionHtml
+      locations { name city isoCountry isRemote }
+      job {
+        employmentType
+        teamDisplayName
+        department { name }
+      }
+      jobPostSectionHtml { introHtml outroHtml }
+      compensationHtml
+    }
+  }`;
+
+  try {
+    const res = await fetchWithTimeout("https://jobs.gem.com/api/public/graphql", {
+      method: "POST",
+      headers: {
+        ...BROWSER_HEADERS,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Origin: "https://jobs.gem.com",
+        Referer: parsed.toString(),
+      },
+      body: JSON.stringify({
+        operationName: "ExternalJobPostingQuery",
+        variables: { boardId, extId },
+        query,
+      }),
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as {
+      data?: {
+        oatsExternalJobPosting?: {
+          title?: string;
+          descriptionHtml?: string;
+          compensationHtml?: string;
+          locations?: Array<{
+            name?: string;
+            city?: string;
+            isoCountry?: string;
+            isRemote?: boolean;
+          }>;
+          job?: {
+            employmentType?: string;
+            teamDisplayName?: string;
+            department?: { name?: string };
+          };
+          jobPostSectionHtml?: { introHtml?: string; outroHtml?: string };
+        } | null;
+      };
+    };
+    const job = json.data?.oatsExternalJobPosting;
+    if (!job) {
+      throw new Error(
+        "This Gem posting was not found — it has likely expired or been removed."
+      );
+    }
+
+    const body = [
+      htmlToText(job.jobPostSectionHtml?.introHtml ?? ""),
+      htmlToText(job.descriptionHtml ?? ""),
+      htmlToText(job.compensationHtml ?? ""),
+      htmlToText(job.jobPostSectionHtml?.outroHtml ?? ""),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    if (!body.trim()) return null;
+
+    const locations = (job.locations ?? [])
+      .map((loc) => {
+        const named = loc.name?.trim();
+        if (named) return named + (loc.isRemote ? " (Remote)" : "");
+        const parts = [loc.city, loc.isoCountry].filter(Boolean).join(", ");
+        return parts + (loc.isRemote ? " (Remote)" : "");
+      })
+      .filter(Boolean);
+
+    const text = collapseWhitespace(
+      [
+        job.title ? `Job Title: ${job.title}` : "",
+        job.job?.department?.name
+          ? `Department: ${job.job.department.name}`
+          : job.job?.teamDisplayName
+            ? `Team: ${job.job.teamDisplayName}`
+            : "",
+        locations.length ? `Location: ${locations.join(" | ")}` : "",
+        job.job?.employmentType
+          ? `Employment Type: ${job.job.employmentType}`
+          : "",
+        body,
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    );
+    return text.length >= 80 ? truncate(text) : null;
+  } catch (err) {
+    if (err instanceof Error && /Gem posting was not found/i.test(err.message)) {
+      throw err;
+    }
+    return null;
+  }
+}
+
+// JazzHR (*.applytojob.com) — full JD is in HTML (#job-description).
+async function scrapeJazzHr(parsed: URL): Promise<string | null> {
+  if (!/applytojob\.com$/i.test(parsed.hostname)) return null;
+
+  try {
+    const res = await fetchWithTimeout(parsed.toString(), {
+      headers: { ...BROWSER_HEADERS, Accept: "text/html,*/*" },
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const $ = cheerio.load(html);
+    $("script, style, noscript").remove();
+
+    const pageTitle = collapseWhitespace($("title").first().text());
+    const titleFromDoc = pageTitle.split(/\s+[-|–—]\s+/)[0]?.trim() || "";
+    const title =
+      collapseWhitespace($("h2.job-title, h1.job-title, .job-title").first().text()) ||
+      (titleFromDoc && !/career|apply/i.test(titleFromDoc) ? titleFromDoc : "") ||
+      collapseWhitespace($("h1").first().text());
+    const company =
+      collapseWhitespace($(".company-name, [class*='company-name']").first().text()) ||
+      collapseWhitespace(pageTitle.split(/\s+[-|–—]\s+/).slice(1).join(" - ")) ||
+      "";
+
+    const desc =
+      collapseWhitespace($("#job-description").text()) ||
+      collapseWhitespace($("[id*='job-description']").first().text()) ||
+      collapseWhitespace($(".job_description, .job-description").first().text());
+
+    if (!desc || desc.length < 80) {
+      const fromLd = extractJsonLdJobPostingFromRaw(html);
+      if (fromLd) return fromLd;
+      return extractFromHtml(html);
+    }
+
+    const text = collapseWhitespace(
+      [
+        title ? `Job Title: ${title}` : "",
+        company && !/career page/i.test(company) ? `Company: ${company}` : "",
+        desc,
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    );
+    return text.length >= 80 ? truncate(text) : null;
   } catch {
     return null;
   }
@@ -619,8 +1101,100 @@ function formatAdpJobDetail(data: AdpJobDetail): string | null {
   return text.length >= 80 ? truncate(text) : null;
 }
 
+/**
+ * ADP MyJobs (myjobs.adp.com/{company}/cx/job-details?reqId=...).
+ * 1) GET career-site config → myJobsToken + orgoid
+ * 2) GET search-meta/{reqId} with those headers → full JD
+ */
+async function scrapeAdpMyJobs(parsed: URL): Promise<string | null> {
+  if (!/myjobs\.adp\.com$/i.test(parsed.hostname)) return null;
+
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  const company = segments[0];
+  const reqId =
+    parsed.searchParams.get("reqId")?.trim() ||
+    parsed.searchParams.get("reqid")?.trim() ||
+    (segments.includes("job") || segments.includes("job-details")
+      ? segments[segments.length - 1]
+      : null);
+  if (!company || !reqId || !/^\d+$/.test(reqId)) return null;
+
+  try {
+    const cfgRes = await fetchWithTimeout(
+      `https://myjobs.adp.com/public/staffing/v1/career-site/${encodeURIComponent(company)}`,
+      {
+        headers: {
+          ...BROWSER_HEADERS,
+          Accept: "application/json, text/plain, */*",
+          Origin: "https://myjobs.adp.com",
+          Referer: "https://myjobs.adp.com/",
+        },
+      }
+    );
+    if (!cfgRes.ok) {
+      console.warn(`[scrape] ADP MyJobs config HTTP ${cfgRes.status} for ${company}`);
+      return null;
+    }
+    const cfg = (await cfgRes.json()) as {
+      myJobsToken?: string;
+      orgoid?: string;
+      clientName?: string;
+    };
+    if (!cfg.myJobsToken || !cfg.orgoid) return null;
+
+    const myadpUrl = "https://my.adp.com";
+    const detailUrl = `${myadpUrl}/myadp_prefix/mycareer/public/staffing/v1/job-requisitions/search-meta/${encodeURIComponent(reqId)}`;
+    const detailRes = await fetchWithTimeout(detailUrl, {
+      headers: {
+        ...BROWSER_HEADERS,
+        Accept: "application/json, text/plain, */*",
+        "Accept-Language": "en-US",
+        Origin: "https://myjobs.adp.com",
+        Referer: parsed.toString(),
+        myjobstoken: cfg.myJobsToken,
+        orgoid: cfg.orgoid,
+      },
+    });
+    if (!detailRes.ok) {
+      console.warn(
+        `[scrape] ADP MyJobs search-meta HTTP ${detailRes.status} for reqId=${reqId}`
+      );
+      return null;
+    }
+    const json = (await detailRes.json()) as {
+      jobRequisitions?: AdpJobDetail[];
+    };
+    const job = json.jobRequisitions?.[0];
+    if (!job) {
+      throw new Error(
+        "This ADP MyJobs posting was not found — it has likely expired or been removed."
+      );
+    }
+
+    const formatted = formatAdpJobDetail(job);
+    if (!formatted) return null;
+    if (cfg.clientName && !formatted.includes("Company:")) {
+      return `Company: ${cfg.clientName}\n\n${formatted}`;
+    }
+    return formatted;
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      /ADP MyJobs posting was not found/i.test(err.message)
+    ) {
+      throw err;
+    }
+    console.warn(
+      "[scrape] ADP MyJobs failed:",
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
+}
+
 async function scrapeAdp(parsed: URL): Promise<string | null> {
   if (!isAdpHost(parsed.hostname)) return null;
+  if (/myjobs\.adp\.com$/i.test(parsed.hostname)) return null;
   if (!/workforcenow\.adp\.com/i.test(parsed.hostname) && !/mascsr/i.test(parsed.pathname)) {
     // Still try if cid+jobId are present on any adp.com careers URL.
     if (!parsed.searchParams.get("cid") || !parsed.searchParams.get("jobId")) {
@@ -1147,14 +1721,47 @@ export async function scrapeJobPage(url: string): Promise<string> {
   }
 
   // Fast, reliable API paths first (no browser overhead).
-  const greenhouse = await scrapeGreenhouse(parsed);
-  if (greenhouse) return greenhouse;
+  // Greenhouse also covers company career pages with ?gh_jid= or /jobs/{id}
+  // (MongoDB, Cribl, Ondaro Wave, job-boards.greenhouse.io, etc.).
+  try {
+    const greenhouse = await scrapeGreenhouse(parsed);
+    if (greenhouse) return greenhouse;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/Greenhouse posting was not found|expired or been removed/i.test(msg)) {
+      throw err;
+    }
+    // Soft-fail discovery errors; continue to other scrapers.
+  }
 
   const lever = await scrapeLever(parsed);
   if (lever) return lever;
 
-  const ashby = await scrapeAshby(parsed, normalized);
-  if (ashby) return ashby;
+  try {
+    const ashby = await scrapeAshby(parsed, normalized);
+    if (ashby) return ashby;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/Ashby posting was not found|expired|unlisted|removed/i.test(msg)) {
+      throw err;
+    }
+  }
+
+  const dayforce = await scrapeDayforce(parsed);
+  if (dayforce) return dayforce;
+
+  try {
+    const gem = await scrapeGem(parsed);
+    if (gem) return gem;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/Gem posting was not found|expired or been removed/i.test(msg)) {
+      throw err;
+    }
+  }
+
+  const jazzHr = await scrapeJazzHr(parsed);
+  if (jazzHr) return jazzHr;
 
   const recruitee = await scrapeRecruitee(parsed);
   if (recruitee) return recruitee;
@@ -1165,10 +1772,26 @@ export async function scrapeJobPage(url: string): Promise<string> {
   const eightfold = await scrapeEightfold(parsed);
   if (eightfold) return eightfold;
 
-  // ADP Workforce Now SPA — public JSON API (works on Vercel, no Playwright).
+  // ADP MyJobs (myjobs.adp.com) + Workforce Now (workforcenow.adp.com).
   if (isAdpHost(parsed.hostname)) {
+    try {
+      const myJobs = await scrapeAdpMyJobs(parsed);
+      if (myJobs) return myJobs;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/ADP MyJobs posting was not found|expired or been removed/i.test(msg)) {
+        throw err;
+      }
+    }
+
     const adp = await scrapeAdp(parsed);
     if (adp) return adp;
+
+    if (/myjobs\.adp\.com$/i.test(parsed.hostname)) {
+      throw new Error(
+        "Could not load this ADP MyJobs posting. Check that the URL still includes the company slug and reqId, or paste the job description manually."
+      );
+    }
     throw new Error(
       "Could not load this ADP Workforce Now posting. Check that the URL still includes cid and jobId, or paste the job description manually."
     );
