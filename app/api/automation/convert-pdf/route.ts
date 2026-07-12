@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "DOCX→PDF failed (docx-to-pdf-lite). On Vercel the preview engine (docx-preview + PlutoPrint) is used; locally Microsoft Word is preferred.",
+            "DOCX→PDF failed. On Vercel, set ConvertAPI Token in the Dashboard (or CONVERTAPI_SECRET / CONVERTAPI_TOKEN env). Locally, Microsoft Word is preferred when installed.",
         },
         { status: 502 }
       );

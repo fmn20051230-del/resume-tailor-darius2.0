@@ -10,6 +10,7 @@ import type {
 import {
   loadSettings,
   mergeServerConfig,
+  saveSettings,
   type AutomationSettings,
 } from "@/lib/automation/settings";
 
@@ -143,6 +144,7 @@ export default function AutomationDashboard() {
   const [concurrency, setConcurrency] = useState(DEFAULT_CONCURRENCY);
   const [previewTab, setPreviewTab] = useState<PreviewTab>("raw");
   const [settings, setSettings] = useState<AutomationSettings | null>(null);
+  const [serverConvertApiConfigured, setServerConvertApiConfigured] = useState(false);
   const [running, setRunning] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -200,7 +202,10 @@ export default function AutomationDashboard() {
     }
     fetch("/api/automation/config")
       .then((r) => r.json())
-      .then((server) => setSettings(mergeServerConfig(saved, server)))
+      .then((server) => {
+        setServerConvertApiConfigured(Boolean(server.convertApiConfigured));
+        setSettings(mergeServerConfig(saved, server));
+      })
       .catch(() => setSettings(saved));
   }, []);
 
@@ -695,6 +700,15 @@ export default function AutomationDashboard() {
     setError("No completed resumes from this batch to download.");
   }
 
+  function updateConvertApiSecret(value: string) {
+    setSettings((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, convertApiSecret: value };
+      saveSettings(next);
+      return next;
+    });
+  }
+
   async function handleStart() {
     if (running || !settings) return;
     const urls = parseJobUrls(urlsText);
@@ -708,6 +722,18 @@ export default function AutomationDashboard() {
     }
     if (!resumeNamePrefix.trim()) {
       setError("Enter a resume name prefix (e.g. darius).");
+      return;
+    }
+    const onVercelHost =
+      typeof window !== "undefined" &&
+      window.location.hostname !== "localhost" &&
+      window.location.hostname !== "127.0.0.1";
+    const convertApiReady =
+      settings.convertApiSecret.trim().length > 4 || serverConvertApiConfigured;
+    if (onVercelHost && !convertApiReady) {
+      setError(
+        "Add your ConvertAPI token below (or set CONVERTAPI_SECRET on Vercel) for Word-matching PDFs."
+      );
       return;
     }
 
@@ -1051,6 +1077,9 @@ export default function AutomationDashboard() {
     typeof window !== "undefined" &&
     window.location.hostname !== "localhost" &&
     window.location.hostname !== "127.0.0.1";
+  const convertApiConnected =
+    Boolean(settings?.convertApiSecret?.trim() && settings.convertApiSecret.trim().length > 4) ||
+    serverConvertApiConfigured;
 
   return (
     <div className="art-dashboard">
@@ -1061,12 +1090,23 @@ export default function AutomationDashboard() {
         </div>
       </header>
 
-      {isProductionHost && (
+      {isProductionHost && !convertApiConnected && (
         <div className="art-banner art-banner--warn" role="status">
-          <strong>Open-source DOCX→PDF:</strong> Uses{" "}
-          <code>docx-to-pdf-lite</code> (docx-preview + PlutoPrint) to convert the real
-          DOCX file. Localhost prefers Microsoft Word for a perfect match. No ConvertAPI /
-          OpenRouter required.
+          <strong>ConvertAPI required for PDFs:</strong> Paste your token below (from{" "}
+          <a href="https://www.convertapi.com/a/auth" target="_blank" rel="noreferrer">
+            convertapi.com/a/auth
+          </a>
+          ) or set <code>CONVERTAPI_SECRET</code> in Vercel Environment Variables. Without it,
+          DOCX still works; PDF layout will not match Word.
+        </div>
+      )}
+      {convertApiConnected && (
+        <div className="art-banner art-banner--ok" role="status">
+          <strong>ConvertAPI connected:</strong> DOCX→PDF on this deploy uses ConvertAPI for
+          Word-matching output.
+          {serverConvertApiConfigured && !settings?.convertApiSecret?.trim()
+            ? " (using Vercel env)"
+            : null}
         </div>
       )}
 
@@ -1105,6 +1145,36 @@ export default function AutomationDashboard() {
                 disabled={running}
                 spellCheck={false}
               />
+            </div>
+
+            <div className="art-field">
+              <label className="art-label" htmlFor="convert-api-dashboard">
+                ConvertAPI Token
+                {convertApiConnected && <span className="art-connected">Connected</span>}
+              </label>
+              <input
+                id="convert-api-dashboard"
+                type="password"
+                className="art-input"
+                value={settings?.convertApiSecret ?? ""}
+                onChange={(e) => updateConvertApiSecret(e.target.value)}
+                placeholder="Paste token from convertapi.com/a/auth"
+                disabled={running || !settings}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <p className="art-hint">
+                Used for Word-matching DOCX→PDF on Vercel. Get a token at{" "}
+                <a
+                  href="https://www.convertapi.com/a/auth"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  convertapi.com/a/auth
+                </a>
+                . Same field is saved under Settings. Or set{" "}
+                <code>CONVERTAPI_SECRET</code> in Vercel env (no need to paste here).
+              </p>
             </div>
 
             <div className="art-field art-field--inline">

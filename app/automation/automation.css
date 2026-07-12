@@ -168,6 +168,17 @@
   color: #fbbf24;
 }
 
+.art-banner--ok {
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  color: #86efac;
+}
+
+.art-banner a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 .art-banner code {
   font-size: 0.85em;
 }
@@ -341,11 +352,20 @@
   line-height: 1.45;
 }
 
+.art-hint a {
+  color: var(--art-blue);
+  text-decoration: underline;
+}
+
 .art-hint code {
   font-size: 0.75rem;
   background: #0c1018;
   padding: 0.1rem 0.35rem;
   border-radius: 4px;
+}
+
+.art-field {
+  margin: 0.75rem 0 0;
 }
 
 .art-stats-row {

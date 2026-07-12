@@ -16,6 +16,7 @@ export function SettingsPanel() {
   const [settings, setSettings] = useState<AutomationSettings>(DEFAULT_SETTINGS);
   const [saved, setSaved] = useState(false);
   const [showPrompt, setShowPrompt] = useState(false);
+  const [serverConvertApiConfigured, setServerConvertApiConfigured] = useState(false);
 
   useEffect(() => {
     const savedLocal = loadSettings();
@@ -24,7 +25,10 @@ export function SettingsPanel() {
 
     fetch("/api/automation/config")
       .then((r) => r.json())
-      .then((server) => setSettings(mergeServerConfig(savedLocal, server)))
+      .then((server) => {
+        setServerConvertApiConfigured(Boolean(server.convertApiConfigured));
+        setSettings(mergeServerConfig(savedLocal, server));
+      })
       .catch(() => setSettings(savedLocal));
   }, []);
 
@@ -50,6 +54,8 @@ export function SettingsPanel() {
   }
 
   const keyConnected = settings.apiKey.trim().length > 8;
+  const convertApiConnected =
+    settings.convertApiSecret.trim().length > 4 || serverConvertApiConfigured;
 
   return (
     <div className="art-settings">
@@ -92,10 +98,8 @@ export function SettingsPanel() {
             </div>
             <div className="art-form-row">
               <label className="art-label" htmlFor="convert-api">
-                ConvertAPI Secret (optional)
-                {settings.convertApiSecret.trim().length > 4 && (
-                  <span className="art-connected">Connected</span>
-                )}
+                ConvertAPI Token
+                {convertApiConnected && <span className="art-connected">Connected</span>}
               </label>
               <input
                 id="convert-api"
@@ -103,13 +107,21 @@ export function SettingsPanel() {
                 className="art-input"
                 value={settings.convertApiSecret}
                 onChange={(e) => update({ convertApiSecret: e.target.value })}
-                placeholder="Optional fallback — primary path is LibreOffice WASM"
+                placeholder="Paste ConvertAPI token / secret"
                 autoComplete="off"
               />
               <p className="art-hint">
-                Not required. Deployed app converts DOCX→PDF with open-source{" "}
-                <code>docx-to-pdf-lite</code> (docx-preview + PlutoPrint). ConvertAPI is
-                only an optional fallback.
+                Required for Word-matching PDFs on Vercel. Get a token at{" "}
+                <a
+                  href="https://www.convertapi.com/a/auth"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  convertapi.com/a/auth
+                </a>
+                . Or set <code>CONVERTAPI_SECRET</code> / <code>CONVERTAPI_TOKEN</code> in
+                Vercel Environment Variables
+                {serverConvertApiConfigured ? " (env is already set on this deploy)." : "."}
               </p>
             </div>
             <div className="art-form-row">

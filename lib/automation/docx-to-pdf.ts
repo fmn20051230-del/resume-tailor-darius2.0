@@ -1,11 +1,10 @@
 /**
  * Converts DOCX → PDF from the real DOCX bytes (no OpenRouter / no HTML resume rebuild).
  *
- * Engines (via open-source docx-to-pdf-lite):
- *   1. Microsoft Word COM on Windows — identical to the DOCX (localhost)
- *   2. System LibreOffice when installed
- *   3. docx-preview + PlutoPrint (pure Node, works on Vercel) — Word-oriented layout
- *   4. Optional ConvertAPI if a secret is configured
+ * Priority:
+ *   1. ConvertAPI when token/secret is set (UI Settings or CONVERTAPI_* env) — Word-quality on Vercel
+ *   2. Localhost: Microsoft Word / LibreOffice via docx-to-pdf-lite
+ *   3. Fallback: docx-preview + PlutoPrint (layout can differ from Word)
  */
 import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -69,7 +68,7 @@ async function convertWithDocxToPdfLite(
   }
 }
 
-function getConvertApiCredential(override?: string | null): string | null {
+export function getConvertApiCredential(override?: string | null): string | null {
   const fromOverride = override?.trim();
   if (fromOverride) return fromOverride;
   return (
@@ -77,6 +76,11 @@ function getConvertApiCredential(override?: string | null): string | null {
     process.env.CONVERTAPI_TOKEN?.trim() ||
     null
   );
+}
+
+/** True when ConvertAPI can be used (request override or Vercel env). */
+export function isConvertApiConfigured(override?: string | null): boolean {
+  return Boolean(getConvertApiCredential(override));
 }
 
 class ConvertApiRetryError extends Error {
@@ -209,12 +213,21 @@ async function convertDocxToPdfOnce(
   docxBuffer: Buffer,
   convertApiSecret?: string | null
 ): Promise<Buffer | null> {
-  // Optional ConvertAPI first when configured (closest to Word on Vercel).
-  const fromConvertApi = await convertWithConvertApi(docxBuffer, convertApiSecret);
-  if (fromConvertApi?.length) return fromConvertApi;
+  const convertApiReady = isConvertApiConfigured(convertApiSecret);
+
+  // ConvertAPI first when configured — closest to Word layout on Vercel.
+  if (convertApiReady) {
+    const fromConvertApi = await convertWithConvertApi(docxBuffer, convertApiSecret);
+    if (fromConvertApi?.length) return fromConvertApi;
+    // On Vercel, do not silently fall back to a different-looking engine.
+    if (isServerless()) {
+      console.warn("[pdf] ConvertAPI failed on Vercel; skipping preview fallback.");
+      return null;
+    }
+  }
 
   if (isServerless()) {
-    // Vercel: open-source docx-preview + PlutoPrint (Word-oriented, no LibreOffice binary).
+    // No ConvertAPI token: best-effort open-source preview (layout may differ).
     return convertWithDocxToPdfLite(docxBuffer, "preview");
   }
 
@@ -277,6 +290,7 @@ export async function convertResumeToPdf(input: {
   });
 }
 
-export function isPdfConversionConfigured(_convertApiSecret?: string | null): boolean {
-  return true;
+export function isPdfConversionConfigured(convertApiSecret?: string | null): boolean {
+  if (!isServerless()) return true;
+  return isConvertApiConfigured(convertApiSecret);
 }

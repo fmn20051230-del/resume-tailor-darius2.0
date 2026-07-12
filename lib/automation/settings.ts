@@ -5,7 +5,7 @@ export const SETTINGS_STORAGE_KEY = "auto-resume-tailor-settings";
 export type AutomationSettings = {
   username: string;
   apiKey: string;
-  /** ConvertAPI secret/token for DOCX→PDF on Vercel (same layout as Word). */
+  /** ConvertAPI token/secret for Word-quality DOCX→PDF on Vercel. */
   convertApiSecret: string;
   extractionPrompt: string;
   tailoringPrompt: string;
