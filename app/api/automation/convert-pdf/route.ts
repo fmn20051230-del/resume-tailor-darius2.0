@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "DOCX→PDF failed. On Vercel: add ConvertAPI Secret in Automation Settings (or CONVERTAPI_SECRET env). Free at convertapi.com. Locally: install Word or LibreOffice.",
+            "DOCX→PDF failed (open-source mammoth + Chromium). Check Vercel function logs.",
         },
         { status: 502 }
       );

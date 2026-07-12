@@ -626,15 +626,9 @@ export default function AutomationDashboard() {
     }
 
     if (backfillFailures > 0) {
-      const onProd =
-        typeof window !== "undefined" &&
-        window.location.hostname !== "localhost" &&
-        window.location.hostname !== "127.0.0.1";
-      if (onProd || !settings?.convertApiSecret?.trim()) {
-        setError(
-          `${backfillFailures} PDF(s) missing. Add ConvertAPI Secret in Settings (convertapi.com) so the deployed app can convert DOCX→PDF with the same layout as Word.`
-        );
-      }
+      setError(
+        `${backfillFailures} PDF(s) could not be converted from DOCX. Check server logs (mammoth + Chromium).`
+      );
     }
   }
 
@@ -1060,14 +1054,9 @@ export default function AutomationDashboard() {
 
       {isProductionHost && (
         <div className="art-banner art-banner--warn" role="status">
-          <strong>Vercel PDF setup:</strong> Localhost uses Microsoft Word for DOCX→PDF.
-          On Vercel, set <strong>ConvertAPI Secret</strong> in{" "}
-          <a href="/automation?tab=settings">Settings</a> (free at{" "}
-          <a href="https://www.convertapi.com" target="_blank" rel="noreferrer">
-            convertapi.com
-          </a>
-          ) so every resume gets a PDF matching the DOCX layout. OpenRouter is not used for
-          PDF.
+          <strong>Deployed PDF:</strong> Uses open-source{" "}
+          <code>mammoth</code> + Chromium to convert each DOCX → PDF (no ConvertAPI /
+          OpenRouter required). Localhost still prefers Microsoft Word when available.
         </div>
       )}
 
@@ -1479,8 +1468,7 @@ export default function AutomationDashboard() {
                   <li>📄 {resumeFileBase}.docx</li>
                   <li>
                     {activeJob.hasPdf ? "📄" : "⚠"} {resumeFileBase}.pdf
-                    {!activeJob.hasPdf &&
-                      " (add ConvertAPI Secret in Settings for Vercel PDFs)"}
+                    {!activeJob.hasPdf && " (DOCX→PDF conversion pending/failed)"}
                   </li>
                   <li>🔗 job_url.txt</li>
                   <li>📝 raw_jd.txt</li>
