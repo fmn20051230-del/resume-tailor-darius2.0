@@ -1,14 +1,15 @@
 /**
  * Converts a generated DOCX resume to PDF (same layout as the Word file).
- * Order: Microsoft Word COM (Windows) → LibreOffice (local) → ConvertAPI (serverless)
- * → simple pdf-lib fallback from markdown (always available on Vercel).
+ * Never uses OpenRouter / LLM — only binary DOCX→PDF converters:
+ *   Windows: Microsoft Word COM
+ *   Local: LibreOffice
+ *   Vercel/serverless: ConvertAPI (set CONVERTAPI_SECRET)
  */
 import { execFile } from "child_process";
 import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 import { promisify } from "util";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
 const execFileAsync = promisify(execFile);
 
@@ -63,7 +64,6 @@ try {
 }
 
 async function convertWithLibreOffice(docxBuffer: Buffer): Promise<Buffer | null> {
-  // LibreOffice binary is not available on Vercel; the package is stubbed there.
   if (isServerless()) return null;
 
   try {
@@ -102,9 +102,39 @@ function getConvertApiCredential(): string | null {
   );
 }
 
+async function parseConvertApiResponse(res: Response): Promise<Buffer | null> {
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.warn("[pdf] ConvertAPI DOCX→PDF failed:", res.status, body.slice(0, 300));
+    return null;
+  }
+
+  const json = (await res.json()) as {
+    Files?: Array<{ FileData?: string; Url?: string }>;
+  };
+  const file = json.Files?.[0];
+  if (file?.FileData) {
+    const pdf = Buffer.from(file.FileData, "base64");
+    return pdf.length ? pdf : null;
+  }
+
+  if (file?.Url) {
+    const fileRes = await fetch(file.Url, { signal: AbortSignal.timeout(60_000) });
+    if (!fileRes.ok) {
+      console.warn("[pdf] ConvertAPI download failed:", fileRes.status);
+      return null;
+    }
+    const pdf = Buffer.from(await fileRes.arrayBuffer());
+    return pdf.length ? pdf : null;
+  }
+
+  console.warn("[pdf] ConvertAPI response missing file data");
+  return null;
+}
+
 /**
- * ConvertAPI keeps Word layout fidelity on serverless hosts where Word/LibreOffice
- * are unavailable. Set CONVERTAPI_SECRET (or CONVERTAPI_TOKEN) in Vercel env vars.
+ * ConvertAPI converts the real DOCX bytes → PDF (same layout). No OpenRouter.
+ * Set CONVERTAPI_SECRET or CONVERTAPI_TOKEN in Vercel env vars.
  * https://www.convertapi.com/docx-to-pdf
  */
 async function convertWithConvertApi(docxBuffer: Buffer): Promise<Buffer | null> {
@@ -112,67 +142,55 @@ async function convertWithConvertApi(docxBuffer: Buffer): Promise<Buffer | null>
   if (!secret) {
     if (isServerless()) {
       console.warn(
-        "[pdf] CONVERTAPI_SECRET not set — will use markdown PDF fallback on Vercel"
+        "[pdf] CONVERTAPI_SECRET not set — cannot convert DOCX→PDF on Vercel (Word/LibreOffice unavailable)."
       );
     }
     return null;
   }
 
+  const payload = {
+    Parameters: [
+      {
+        Name: "File",
+        FileValue: {
+          Name: "resume.docx",
+          Data: docxBuffer.toString("base64"),
+        },
+      },
+      { Name: "StoreFile", Value: "false" },
+    ],
+  };
+
   try {
-    const res = await fetch("https://v2.convertapi.com/convert/docx/to/pdf", {
+    // Prefer Bearer token auth (current ConvertAPI docs).
+    let res = await fetch("https://v2.convertapi.com/convert/docx/to/pdf", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${secret}`,
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      body: JSON.stringify({
-        Parameters: [
-          {
-            Name: "File",
-            FileValue: {
-              Name: "resume.docx",
-              Data: docxBuffer.toString("base64"),
-            },
-          },
-          { Name: "StoreFile", Value: "false" },
-        ],
-      }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(90_000),
     });
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      console.warn(
-        "[pdf] ConvertAPI DOCX→PDF failed:",
-        res.status,
-        body.slice(0, 300)
+    // Older accounts still use ?Secret= query auth.
+    if (res.status === 401 || res.status === 403) {
+      res = await fetch(
+        `https://v2.convertapi.com/convert/docx/to/pdf?Secret=${encodeURIComponent(secret)}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(90_000),
+        }
       );
-      return null;
     }
 
-    const json = (await res.json()) as {
-      Files?: Array<{ FileData?: string; Url?: string }>;
-    };
-    const file = json.Files?.[0];
-    if (file?.FileData) {
-      const pdf = Buffer.from(file.FileData, "base64");
-      return pdf.length ? pdf : null;
-    }
-
-    if (file?.Url) {
-      const fileRes = await fetch(file.Url, { signal: AbortSignal.timeout(60_000) });
-      if (!fileRes.ok) {
-        console.warn("[pdf] ConvertAPI download failed:", fileRes.status);
-        return null;
-      }
-      const ab = await fileRes.arrayBuffer();
-      const pdf = Buffer.from(ab);
-      return pdf.length ? pdf : null;
-    }
-
-    console.warn("[pdf] ConvertAPI response missing file data");
-    return null;
+    return await parseConvertApiResponse(res);
   } catch (err) {
     console.warn(
       "[pdf] ConvertAPI DOCX→PDF failed:",
@@ -182,105 +200,22 @@ async function convertWithConvertApi(docxBuffer: Buffer): Promise<Buffer | null>
   }
 }
 
-/** Strip markdown markers for a plain-text PDF fallback. */
-function markdownToPlainLines(markdown: string): string[] {
-  return markdown
-    .replace(/\r\n/g, "\n")
-    .split("\n")
-    .map((line) =>
-      line
-        .replace(/^#{1,6}\s+/, "")
-        .replace(/\*\*(.*?)\*\*/g, "$1")
-        .replace(/\*(.*?)\*/g, "$1")
-        .replace(/^[-*+]\s+/, "• ")
-        .replace(/^\d+\.\s+/, "")
-        .replace(/`([^`]+)`/g, "$1")
-        .trimEnd()
-    );
-}
-
 /**
- * Last-resort PDF when Word/LibreOffice/ConvertAPI are unavailable (typical on Vercel).
- * Layout is plain text — not identical to the DOCX template — but always produces a PDF.
+ * Convert DOCX bytes to PDF bytes (layout-faithful). Never regenerates via LLM.
+ * Returns null if no converter is available.
  */
-export async function convertMarkdownToPdf(markdown: string): Promise<Buffer | null> {
-  const text = markdown?.trim();
-  if (!text) return null;
+export async function convertDocxToPdf(docxBuffer: Buffer): Promise<Buffer | null> {
+  if (!docxBuffer?.length) return null;
 
-  try {
-    const doc = await PDFDocument.create();
-    const font = await doc.embedFont(StandardFonts.Helvetica);
-    const bold = await doc.embedFont(StandardFonts.HelveticaBold);
-    const fontSize = 10;
-    const lineHeight = 13;
-    const margin = 50;
-    const pageWidth = 612;
-    const pageHeight = 792;
-    const maxWidth = pageWidth - margin * 2;
-
-    let page = doc.addPage([pageWidth, pageHeight]);
-    let y = pageHeight - margin;
-
-    const wrapLine = (line: string, useBold: boolean): void => {
-      const f = useBold ? bold : font;
-      const words = line.length ? line.split(/\s+/) : [""];
-      let current = "";
-      const flush = (chunk: string) => {
-        if (y < margin + lineHeight) {
-          page = doc.addPage([pageWidth, pageHeight]);
-          y = pageHeight - margin;
-        }
-        page.drawText(chunk || " ", {
-          x: margin,
-          y,
-          size: fontSize,
-          font: f,
-          color: rgb(0.1, 0.1, 0.1),
-          maxWidth,
-        });
-        y -= lineHeight;
-      };
-
-      for (const word of words) {
-        const next = current ? `${current} ${word}` : word;
-        const width = f.widthOfTextAtSize(next, fontSize);
-        if (width > maxWidth && current) {
-          flush(current);
-          current = word;
-        } else {
-          current = next;
-        }
-      }
-      flush(current);
-    };
-
-    for (const raw of markdownToPlainLines(text)) {
-      if (!raw.trim()) {
-        y -= lineHeight * 0.5;
-        continue;
-      }
-      const isHeading =
-        /^[A-Z][A-Za-z0-9 /&-]{2,40}$/.test(raw.trim()) ||
-        /^(Summary|Experience|Education|Skills|Certifications|Projects)\b/i.test(
-          raw.trim()
-        );
-      wrapLine(raw, isHeading);
-    }
-
-    const bytes = await doc.save();
-    return Buffer.from(bytes);
-  } catch (err) {
+  // On Vercel, skip straight to ConvertAPI (Word/LibreOffice are not installed).
+  if (isServerless()) {
+    const fromConvertApi = await convertWithConvertApi(docxBuffer);
+    if (fromConvertApi?.length) return fromConvertApi;
     console.warn(
-      "[pdf] markdown PDF fallback failed:",
-      err instanceof Error ? err.message : err
+      "[pdf] DOCX→PDF failed on serverless. Set CONVERTAPI_SECRET in Vercel env vars."
     );
     return null;
   }
-}
-
-/** Convert DOCX bytes to PDF bytes. Returns null if no converter is available. */
-export async function convertDocxToPdf(docxBuffer: Buffer): Promise<Buffer | null> {
-  if (!docxBuffer?.length) return null;
 
   const fromWord = await convertWithWord(docxBuffer);
   if (fromWord?.length) return fromWord;
@@ -292,41 +227,24 @@ export async function convertDocxToPdf(docxBuffer: Buffer): Promise<Buffer | nul
   if (fromConvertApi?.length) return fromConvertApi;
 
   console.warn(
-    "[pdf] Word/LibreOffice/ConvertAPI unavailable for DOCX→PDF."
+    "[pdf] Could not convert DOCX→PDF. Install Microsoft Word or LibreOffice, or set CONVERTAPI_SECRET."
   );
   return null;
 }
 
-/**
- * Prefer layout-faithful DOCX→PDF; if that fails, fall back to a markdown PDF
- * so deployed ZIPs still include a .pdf file.
- */
+/** Alias used by automation — DOCX only, no markdown restyle. */
 export async function convertResumeToPdfBuffer(input: {
   docxBuffer: Buffer;
   resumeMarkdown?: string;
 }): Promise<Buffer | null> {
-  const fromDocx = await convertDocxToPdf(input.docxBuffer);
-  if (fromDocx?.length) return fromDocx;
-
-  if (input.resumeMarkdown?.trim()) {
-    const fromMd = await convertMarkdownToPdf(input.resumeMarkdown);
-    if (fromMd?.length) {
-      console.warn("[pdf] Using markdown PDF fallback (layout differs from DOCX).");
-      return fromMd;
-    }
-  }
-
-  return null;
+  return convertDocxToPdf(input.docxBuffer);
 }
 
-/** @deprecated Use convertDocxToPdf / convertResumeToPdfBuffer */
+/** @deprecated Use convertDocxToPdf */
 export async function convertResumeToPdf(input: {
   docxBuffer: Buffer;
   resumeMarkdown?: string;
   baseResume?: string;
 }): Promise<Buffer | null> {
-  return convertResumeToPdfBuffer({
-    docxBuffer: input.docxBuffer,
-    resumeMarkdown: input.resumeMarkdown,
-  });
+  return convertDocxToPdf(input.docxBuffer);
 }
